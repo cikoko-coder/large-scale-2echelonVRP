@@ -35,6 +35,10 @@ RANDOM_SEED = 32           # same seed rule as Solve_by_decomposition: seed + it
 LOG_MIP_CALLS = True       # count every Gurobi solve (model name, status) during the run
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
+ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
+REFILL_RULE = "optimal_cost"  # route check rule: "optimal_cost" (bounded DP) or "optimal" (exactly the minimum)
+CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
+REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---
 
@@ -158,37 +162,59 @@ def replay_route_timeline(problem, route, transfer_points, satellite_of=None):
 
 
 def trace_route_check(problem, route):
-    """Explain the result of RH.is_route_feasible for one route and compare it with the street MIP."""
-    import MathModels
+    """Explain the result of RH.is_route_feasible for one route: minimum-transshipment DP,
+    bounded DP (the rule) and, with CROSS_CHECK_MIP, the street MIP for comparison."""
     info = {"n": len(route), "demand": sum(node.demand for node in route)}
     info["makespan_vehicles"] = RH.get_makespan(problem, route)
     info["tabu"] = RH.is_in_tabu_list(problem, route)
-    info["heuristic_transfers"] = RH.refill_points(problem, route)
+    t0 = time.time()
     info["relaxed_feasible"] = RH.is_route_feasible(problem, route)[0]
+    info["time_check"] = time.time() - t0
+    minimum = RH.bothway_optimal_checking(problem, route)
+    t0 = time.time()
+    bounded = RH.optimal_transshipment_checking(problem, route)
+    info["time_dp"] = time.time() - t0
+    info["minimum"], info["bounded"] = minimum, bounded
+    info["m"] = bounded["min_trips"]
+    info["dp_transfers"] = bounded["refills"]
+    info["n_trips"] = bounded["n_trips"]
 
-    rows, violation, end = replay_route_timeline(problem, route, info["heuristic_transfers"])
-    info["rows"], info["violation"], info["end"] = rows, violation, end
-    if RH.REFILL_RULE in ("optimal", "optimal_cost") and not info["relaxed_feasible"] and info["makespan_vehicles"] <= 1 and not info["tabu"]:
-        info["reason"] = f"no refill plan is within capacity and on time (refill DP, rule {RH.REFILL_RULE})"
-    elif info["makespan_vehicles"] > 1:
+    if info["makespan_vehicles"] > 1:
         info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
     elif info["tabu"]:
         info["reason"] = "route contains a tabu sequence"
-    elif violation:
-        pos, idx, arr, l, late = violation
-        info["reason"] = f"time window: customer {idx} (position {pos}) reached at {arr} > end {l} (late {late})"
-    elif end > problem.depot.end_interval:
-        info["reason"] = f"return {round(end, 1)} after the garage end {problem.depot.end_interval} and mip_checking failed"
+    elif not bounded["feasible"]:
+        attempts = "; ".join(f"K={k}: {v}" for k, v in bounded["attempts"].items())
+        info["reason"] = f"no refill plan is within capacity and on time ({attempts})"
+    elif not minimum["feasible"]:
+        info["reason"] = (f"minimum m={info['m']} transshipments is late ({minimum['attempts'].get(info['m'])}); "
+                          f"{bounded['n_trips']} transshipments are on time")
     else:
         info["reason"] = "-"
 
-    feasible, cost, visits, _ = MathModels.street_problem_MIP(problem, problem.timelimit_SEmodel, route)
-    info["mip_feasible"], info["mip_cost"] = feasible, cost
-    info["mip_transfers"] = [i for i, p in visits] if feasible else []
-    if feasible:
-        satellite_of = {i: p for i, p in visits}
-        rows2, violation2, _ = replay_route_timeline(problem, route, info["mip_transfers"], satellite_of)
-        info["mip_rows"], info["mip_replay_violation"] = rows2, violation2
+    info["mip_feasible"] = None
+    if CROSS_CHECK_MIP:
+        import MathModels
+        t0 = time.time()
+        feasible, cost, visits, _ = MathModels.street_problem_MIP(problem, problem.timelimit_SEmodel, route)
+        info["time_mip"] = time.time() - t0
+        info["mip_feasible"], info["mip_cost"] = feasible, cost
+        info["mip_transfers"] = [i for i, p in visits] if feasible else []
+        #solve_MIP runs with MIPGap 1e-4: the MIP may return a plan up to 1e-4 * objective more
+        #expensive than the optimum (about 4 cost units at 40000); the DP is exact
+        gap = 1e-4*(abs(cost) + problem.cost_vehicle_use + sum(
+            problem.travel_matrix[a][b] for a, b in zip([0] + [n.index for n in route], [n.index for n in route] + [0])))
+        info["mip_agrees"] = (feasible == bounded["feasible"]
+                              and (not feasible or bounded["transfer_cost"] <= cost + 1e-3))
+        info["mip_within_gap"] = feasible and bounded["feasible"] and cost - bounded["transfer_cost"] > 1e-3 \
+            and cost - bounded["transfer_cost"] <= gap + 1e-3
+        if feasible:
+            satellite_of = {i: p for i, p in visits}
+            rows2, violation2, _ = replay_route_timeline(problem, route, info["mip_transfers"], satellite_of)
+            info["mip_rows"], info["mip_replay_violation"] = rows2, violation2
+    if bounded["feasible"]:
+        rows, violation, end = replay_route_timeline(problem, route, bounded["refills"], bounded["satellites"])
+        info["rows"], info["violation"], info["end"] = rows, violation, end
     return info
 
 
@@ -198,38 +224,63 @@ def diagnose_two_echelon_filter(problem, emit, details):
     check_found_solutions keeps a stored route set only if check_VRP_solution says it is
     feasible, i.e. RH.is_route_feasible holds for every route; only those sets reach the
     multi-trip / MVRP checks and the water (FE) MIP. Nothing in problem is changed.
+    Returns a statistics dict (routes checked, routes with K > m, DP/MIP agreement, times).
     """
     emit(f"stored complete solutions: {len(problem.heuristics_solutions)} (cutoff {problem.cutoff}, "
-         f"min vessels bound {problem.minVessel_bound})")
-    summary = []
+         f"min vessels bound {problem.minVessel_bound}); route check rule {RH.REFILL_RULE}, "
+         f"per-route check {RH.ROUTE_CHECK}, MIP cross-check {CROSS_CHECK_MIP}")
+    stats = collections.Counter()
     for k, sequences in enumerate(problem.heuristics_solutions):
         routes = [[problem.nodes[x] for x in sequence] for sequence in sequences]
         checked = sorted(sequences, key=lambda x: x[0]) in problem.checked_solutions
         traces = [trace_route_check(problem, route) for route in routes]
         passes = all(tr["relaxed_feasible"] for tr in traces)
-        emit(f"  solution {k}: {len(routes)} routes, sizes {[len(r) for r in routes]}, already checked {checked} -> "
-             + ("passes the relaxed check, goes on to the multi-trip/MVRP/FE checks" if passes
-                else "REJECTED by the relaxed check (never reaches the FE solver)"))
+        extra = sum(1 for tr in traces if tr["bounded"]["feasible"] and tr["n_trips"] > tr["m"])
+        stats["solutions"] += 1
+        stats["solutions_pass"] += passes
+        stats["routes"] += len(traces)
+        stats["routes_feasible"] += sum(tr["bounded"]["feasible"] for tr in traces)
+        stats["routes_extra_transshipment"] += extra
+        stats["routes_minimum_infeasible_but_feasible"] += sum(
+            1 for tr in traces if tr["bounded"]["feasible"] and not tr["minimum"]["feasible"])
+        stats["time_dp"] += sum(tr["time_dp"] for tr in traces)
+        if CROSS_CHECK_MIP:
+            stats["time_mip"] += sum(tr["time_mip"] for tr in traces)
+            stats["mip_disagree"] += sum(1 for tr in traces if not tr["mip_agrees"])
+        emit(f"  solution {k}: {len(routes)} routes, sizes {[len(r) for r in routes]}, "
+             f"trips {[tr['n_trips'] if tr['bounded']['feasible'] else '-' for tr in traces]} "
+             f"(minimum {[tr['m'] for tr in traces]}), already checked {checked} -> "
+             + ("passes the route check, goes on to the multi-trip/MVRP/FE checks" if passes
+                else "REJECTED by the route check (never reaches the FE solver)"))
+        stats["mip_within_gap"] += sum(1 for tr in traces if tr.get("mip_within_gap"))
         for r, tr in enumerate(traces):
-            if tr["relaxed_feasible"]:
+            if tr["reason"] == "-" and (tr["mip_feasible"] is None or (tr["mip_agrees"] and not tr["mip_within_gap"])):
                 continue
-            mip = (f"street MIP feasible (cost {round(tr['mip_cost'], 1)})" if tr["mip_feasible"]
-                   else "street MIP infeasible")
-            replay = ""
-            if tr["mip_feasible"]:
-                v = tr["mip_replay_violation"]
-                replay = (", timeline with the MIP transfer points: on time" if v is None
-                          else f", timeline with the MIP transfer points: late at customer {v[1]} by {v[4]}")
-            emit(f"    route {r} ({tr['n']} customers, demand {tr['demand']}): {tr['reason']}; {mip}{replay}")
-            emit(f"      transfer points relaxed check {tr['heuristic_transfers']}  |  street MIP {tr['mip_transfers']}")
-            summary.append((k, r, tr))
+            mip = ""
+            if tr["mip_feasible"] is not None:
+                mip = (f"; street MIP feasible (cost {round(tr['mip_cost'], 1)}, {len(tr['mip_transfers'])} transshipments)"
+                       if tr["mip_feasible"] else "; street MIP infeasible")
+                if not tr["mip_agrees"]:
+                    mip += "  ** DP and MIP DISAGREE **"
+                elif tr["mip_within_gap"]:
+                    mip += "  (MIP plan is suboptimal within its MIPGap 1e-4; the DP plan is cheaper)"
+            emit(f"    route {r} ({tr['n']} customers, demand {tr['demand']}): {tr['reason']}{mip}")
+            emit(f"      transfer points DP {tr['dp_transfers']}" +
+                 (f"  |  street MIP {tr['mip_transfers']}" if tr["mip_feasible"] is not None else ""))
             details.append(f"solution {k} route {r}: {tr['reason']}")
-            details.append("  relaxed-check timeline (pos, customer, satellite, detour, arrival, e, l, start, late)")
-            details += [f"    {row}" for row in tr["rows"]]
-            if tr["mip_feasible"]:
+            if tr["bounded"]["feasible"]:
+                details.append("  timeline with the DP transfer points (pos, customer, satellite, detour, arrival, e, l, start, late)")
+                details += [f"    {row}" for row in tr["rows"]]
+            if tr.get("mip_feasible"):
                 details.append("  timeline with the street MIP transfer points and satellites")
                 details += [f"    {row}" for row in tr["mip_rows"]]
-    return summary
+    emit(f"  routes checked {stats['routes']}, feasible {stats['routes_feasible']}, "
+         f"needing more than the minimum transshipments {stats['routes_extra_transshipment']} "
+         f"(rejected by the minimum rule {stats['routes_minimum_infeasible_but_feasible']}); "
+         f"DP time {stats['time_dp']:.3f}s" +
+         (f", MIP time {stats['time_mip']:.3f}s, disagreements {stats['mip_disagree']}, "
+          f"MIP plans suboptimal within the gap {stats['mip_within_gap']}" if CROSS_CHECK_MIP else ""))
+    return stats
 
 
 def build_problem(instance_name: str, reports: dict):
@@ -268,6 +319,9 @@ def run_initial_construction(instance_name: str, reports: dict):
     import random
 
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
+    RH.ROUTE_CHECK = ROUTE_CHECK
+    RH.REFILL_RULE = REFILL_RULE
+    MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
     out = []
 
     def emit(text=""):
@@ -305,7 +359,10 @@ def run_initial_construction(instance_name: str, reports: dict):
     construction = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
     t_construction = time.time() - t1
     emit("")
-    emit(f"--- step 1: multi-start construction ({START_CONS} starts) + street MIP per route: {t_construction:.2f}s")
+    emit(f"--- step 1: multi-start construction ({START_CONS} starts) + transshipment check per route ({RH.ROUTE_CHECK}): {t_construction:.2f}s")
+    for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
+        emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'} multi-trip solution, "
+             f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}")
     emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
     if mip_log is not None:
         emit(summarize_mip_calls(mip_log, n_mip))
@@ -330,6 +387,9 @@ def run_initial_construction(instance_name: str, reports: dict):
          f"rejected before the water level {len(problem.checked_solutions) - len(problem.feas_solutions) - len(problem.inf_solutions)}")
     if mip_log is not None:
         emit(summarize_mip_calls(mip_log, n_mip))
+    for k, sol in enumerate(problem.feas_solutions):
+        emit(f"  two-echelon feasible solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, "
+             f"{sol.nFEVs} FEVs, travel total {round(sol.travelTotal, 1)}")
     emit(describe_solution(problem, problem.best_found, "initial two-echelon solution (problem.best_found)"))
     if problem.best_found is None:
         emit("NOTE: no two-echelon solution -> Solve_by_decomposition would stop in Local_search_incumbent.")

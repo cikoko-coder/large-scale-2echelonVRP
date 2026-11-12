@@ -80,12 +80,13 @@ def backward_checking(problem_instance, route):
     return [route[0].index] + [route[pos].index for pos in cut_positions]
 
 #refill rule used by the relaxed route check (is_route_feasible):
-#  "optimal"      -> bothway_optimal_checking: minimum number of transshipments, best refill
-#                    points between the backward and forward bounds (DP)
-#  "optimal_cost" -> optimal_transshipment_checking: adds transshipments until the travel cost
-#                    is optimal (same solution as the street MIP)
+#  "optimal_cost" -> optimal_transshipment_checking: the minimum number of transshipments m is
+#                    the starting bound of the DP; more are used when K = m is not on time or
+#                    when they are cheaper (same solution as the street MIP)
+#  "optimal"      -> bothway_optimal_checking: exactly m transshipments, best refill points
+#                    between the backward and forward bounds (DP); rejects routes needing m+1
 #  "backward" / "forward" -> fixed greedy refill points
-REFILL_RULE = "optimal"
+REFILL_RULE = "optimal_cost"
 
 def refill_points(problem_instance, route):
     """Refill (transfer) points assumed by the relaxed route check, see REFILL_RULE."""
@@ -131,10 +132,124 @@ def bothway_optimal_checking(problem_instance, route):
     greedy positions, backward[k] <= c_k <= forward[k], and the DP picks the best refill
     points inside these windows (cheapest detours, on time, within capacity).
     A route that needs more than m transshipments to be on time is rejected here; see
-    optimal_transshipment_checking for the cost-optimal number of transshipments.
+    optimal_transshipment_checking, which uses m as the starting bound.
     :return: same dict as optimal_transshipment_checking
     """
     return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
+
+def refill_detours(problem_instance, route):
+    """(detour, satellite) of the closest satellite for a refill before every route position:
+    detour = t(i,p) + t(p,j) - t(i,j) >= 0 with i the predecessor (garage for position 0)."""
+    t = problem_instance.travel_matrix
+    previous = [0] + [node.index for node in route[:-1]]
+    out = []
+    for pos, node in enumerate(route):
+        i = previous[pos]
+        detour, satellite = min((t[i][p.index] + t[p.index][node.index] - t[i][node.index], p.index)
+                                for p in problem_instance.satellites)
+        out.append((max(0.0, detour), satellite)) #lead time >= 0 in the MIP (rounding can give -0.1)
+    return out
+
+def refill_time_bounds(problem_instance, route, detours = None):
+    """
+    Time relaxation of the refill plan of a fixed route. A refill only adds time (detour >= 0
+    plus the transfer duration), so the fastest schedule refills only before the first
+    customer. Returns None when that schedule misses a window: then no refill plan is on time.
+    Otherwise returns (earliest, latest, can_refill, refill_slack):
+      earliest[pos]     end of service at pos in the fastest schedule;
+      latest[pos]       latest start of service at pos from which every later customer is still
+                        on time without further refills (an upper bound on the real latest start);
+      refill_slack[pos] min(window end, latest[pos]) - earliest arrival at pos with the detour and
+                        the transfer: negative means a refill before pos is late in every plan;
+      can_refill[pos]   refill_slack[pos] >= 0. Position 0 is always a refill and is always True
+                        when the fastest schedule is on time.
+    """
+    n = len(route)
+    t = problem_instance.travel_matrix
+    transfer = problem_instance.TransferDuration
+    detours = detours if detours is not None else refill_detours(problem_instance, route)
+    previous = [0] + [node.index for node in route[:-1]]
+    drive = [t[previous[pos]][node.index] for pos, node in enumerate(route)]
+
+    earliest = []
+    finish = problem_instance.depot.start_interval + detours[0][0] + transfer
+    for pos, node in enumerate(route):
+        arrival = finish + drive[pos]
+        if arrival > node.end_interval:
+            return None
+        finish = max(arrival, node.start_interval) + node.unloading_time
+        earliest.append(finish)
+
+    latest = [node.end_interval for node in route]
+    for pos in range(n - 2, -1, -1):
+        latest[pos] = min(latest[pos], latest[pos + 1] - drive[pos + 1] - route[pos].unloading_time)
+
+    refill_slack = [math.inf]
+    for pos in range(1, n):
+        arrival = earliest[pos - 1] + drive[pos] + detours[pos][0] + transfer
+        refill_slack.append(min(route[pos].end_interval, latest[pos]) - arrival)
+    can_refill = [slack >= -1e-9 for slack in refill_slack]
+    return earliest, latest, can_refill, refill_slack
+
+def fastest_refill_plan(problem_instance, route, n_trips, lo, hi, can_refill = None, detours = None):
+    """
+    Feasibility of a split of the route into exactly n_trips trips whose k-th trip starts in
+    [lo[k], hi[k]] (refill_windows): dynamic programming that keeps only the EARLIEST end of
+    service per (trips started, start position of the current trip), O(n * n_trips * window width).
+    :return: dict feasible, finish, refills (positions), blocked = (position, lateness) of the
+             position where every label died (None when feasible): the smallest arrival there
+             over every continuation exceeds the window end by `lateness`.
+    """
+    n = len(route)
+    t = problem_instance.travel_matrix
+    capacity = problem_instance.capacity_SEV
+    transfer = problem_instance.TransferDuration
+    detours = detours if detours is not None else refill_detours(problem_instance, route)
+    can_refill = can_refill if can_refill is not None else [True]*n
+    prefix = [0]
+    for node in route:
+        prefix.append(prefix[-1] + node.demand)
+    previous = [0] + [node.index for node in route[:-1]]
+
+    result = {"feasible": False, "finish": None, "refills": [], "blocked": None}
+    node = route[0]
+    arrival = problem_instance.depot.start_interval + t[0][node.index] + detours[0][0] + transfer
+    if arrival > node.end_interval:
+        result["blocked"] = (0, arrival - node.end_interval)
+        return result
+    labels = {(1, 0): (max(arrival, node.start_interval) + node.unloading_time, (0,))}
+    for pos in range(1, n):
+        node = route[pos]
+        drive = t[previous[pos]][node.index]
+        new_labels = {}
+        best_arrival = math.inf
+        for (started, start), (finish, refills) in labels.items():
+            must_cut_before = started < n_trips and pos > hi[started]
+            if not must_cut_before and prefix[pos + 1] - prefix[start] <= capacity:
+                arrival = finish + drive
+                best_arrival = min(best_arrival, arrival)
+                if arrival <= node.end_interval:
+                    label = (max(arrival, node.start_interval) + node.unloading_time, refills)
+                    if (started, start) not in new_labels or label[0] < new_labels[(started, start)][0]:
+                        new_labels[(started, start)] = label
+            if started < n_trips and lo[started] <= pos <= hi[started] and can_refill[pos]:
+                arrival = finish + drive + detours[pos][0] + transfer
+                best_arrival = min(best_arrival, arrival)
+                if arrival <= node.end_interval:
+                    label = (max(arrival, node.start_interval) + node.unloading_time, refills + (pos,))
+                    if (started + 1, pos) not in new_labels or label[0] < new_labels[(started + 1, pos)][0]:
+                        new_labels[(started + 1, pos)] = label
+        if not new_labels:
+            result["blocked"] = (pos, best_arrival - node.end_interval if best_arrival < math.inf else math.inf)
+            return result
+        labels = new_labels
+    complete = [(finish, refills) for (started, start), (finish, refills) in labels.items() if started == n_trips]
+    if not complete:
+        result["blocked"] = (n - 1, math.inf) #capacity: the last trips could not be started
+        return result
+    finish, refills = min(complete)
+    result.update(feasible=True, finish=finish, refills=list(refills))
+    return result
 
 def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     """
@@ -150,27 +265,34 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     * trip loads <= SEV capacity;
     * cost = vehicle use + travel cost of the route + travel cost of the detours
              + trip_unit_cost per refill   (the MIP objective for one route).
-    The number of trips K starts at the minimum m and grows (more refills can be needed to
-    use satellites that are on the way) until the cost lower bound of K trips exceeds the
-    best cost found; extra_trips limits K to m + extra_trips (0: minimum transshipments only,
-    None: no limit, the street MIP's optimum). Labels: per (trips started, start of the current trip) the Pareto set
-    of (finish time, cost); only refill positions inside the windows are expanded.
+    The minimum number of trips m (greedy split) is the starting BOUND, not a rule: K = m is
+    tried first; when it is feasible its cost is the incumbent and K = m+1, m+2, ... are
+    explored only while the lower bound (fixed cost + K * trip_unit_cost) is below the incumbent
+    (with a transshipment cost of 10000 this stops at once); when K = m is infeasible, K grows
+    until a feasible split is found (tight time windows can force an extra transshipment) or no
+    window position can take a refill. extra_trips limits K to m + extra_trips (0: minimum
+    transshipments only, None: no limit, the street MIP's optimum).
+    Per K: refill_time_bounds removes the window positions that cannot take a refill on time,
+    fastest_refill_plan (earliest finish per (trip, start), O(n*W)) decides feasibility, and the
+    Pareto DP over (finish time, cost) labels finds the cheapest plan only for feasible K.
 
     :return: dict with feasible, refills (customer indices), satellites ({customer: satellite}),
              cost (full route cost), transfer_cost (detours + refills, the cost street_problem_MIP
-             returns), n_trips, finish (end of the last service), labels (DP work)
+             returns), n_trips, min_trips (m), finish (end of the last service), labels (DP work),
+             attempts ({K: "feasible" | reason}), blocked: for an infeasible route, (position,
+             customer index, lateness) where the fastest schedule / the K = m split dies
     """
     result = {"feasible": False, "refills": [], "satellites": {}, "cost": BigNumber, "transfer_cost": BigNumber,
-              "n_trips": 0, "finish": None, "labels": 0}
+              "n_trips": 0, "min_trips": 0, "finish": None, "labels": 0, "attempts": {}, "blocked": None}
     n = len(route)
     if n == 0:
         result.update(feasible=True, cost=0, transfer_cost=0)
         return result
     capacity = problem_instance.capacity_SEV
     if any(node.demand > capacity for node in route):
+        result["attempts"]["capacity"] = "a customer demand exceeds the SEV capacity"
         return result
     t = problem_instance.travel_matrix
-    satellites = problem_instance.satellites
     unit = problem_instance.cost_unit_travel
     transfer = problem_instance.TransferDuration
 
@@ -178,20 +300,21 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     for node in route:
         prefix.append(prefix[-1] + node.demand)
     previous = [0] + [node.index for node in route[:-1]]
-    #closest satellite of every refill position: (detour, satellite)
-    refill_detour = []
-    for pos, node in enumerate(route):
-        i = previous[pos]
-        detour, satellite = min((t[i][p.index] + t[p.index][node.index] - t[i][node.index], p.index) for p in satellites)
-        refill_detour.append((max(0.0, detour), satellite)) #lead time >= 0 in the MIP (rounding can give -0.1)
+    detours = refill_detours(problem_instance, route)
     #time relaxation: every refill adds a detour >= 0, so the fastest schedule refills only before
     #the first customer (capacity ignored); if it misses a window, no refill plan is on time
-    finish = problem_instance.depot.start_interval + refill_detour[0][0] + transfer
-    for pos, node in enumerate(route):
-        arrival = finish + t[previous[pos]][node.index]
-        if arrival > node.end_interval:
-            return result
-        finish = max(arrival, node.start_interval) + node.unloading_time
+    bounds = refill_time_bounds(problem_instance, route, detours)
+    if bounds is None:
+        finish = problem_instance.depot.start_interval + detours[0][0] + transfer
+        for pos, node in enumerate(route):
+            arrival = finish + t[previous[pos]][node.index]
+            if arrival > node.end_interval:
+                result["blocked"] = (pos, node.index, arrival - node.end_interval)
+                break
+            finish = max(arrival, node.start_interval) + node.unloading_time
+        result["attempts"]["time"] = "the fastest schedule (no refill after the first customer) is late"
+        return result
+    earliest, latest, can_refill, refill_slack = bounds
     fixed_cost = problem_instance.cost_vehicle_use + unit*(
         sum(t[previous[pos]][node.index] for pos, node in enumerate(route)) + t[route[-1].index][0])
 
@@ -199,7 +322,10 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     forward = [where[i] for i in forward_checking(problem_instance, route)]
     backward = [where[i] for i in backward_checking(problem_instance, route)]
     m = len(forward)
-    max_trips = n if extra_trips is None else min(n, m + extra_trips)
+    result["min_trips"] = m
+    max_trips = min(n, sum(can_refill))
+    if extra_trips is not None:
+        max_trips = min(max_trips, m + extra_trips)
 
     def add_label(labels, key, label):
         front = labels.setdefault(key, [])
@@ -212,20 +338,46 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     best = None
     for n_trips in range(m, max_trips + 1):
         if best is not None and fixed_cost + n_trips*problem_instance.trip_unit_cost >= best[1] - 1e-9:
+            result["attempts"][n_trips] = "lower bound >= incumbent"
             break #more refills cannot be cheaper
         lo, hi = refill_windows(problem_instance, route, n_trips, forward, backward)
-        if any(lo[k] > hi[k] for k in range(n_trips)):
+        #shrink the windows to the positions that can take a refill on time
+        empty = None
+        for k in range(1, n_trips):
+            feasible_positions = [pos for pos in range(lo[k], hi[k] + 1) if can_refill[pos]]
+            if not feasible_positions:
+                empty = k
+                break
+            lo[k], hi[k] = feasible_positions[0], feasible_positions[-1]
+        if empty is not None:
+            if lo[empty] <= hi[empty]:
+                late = ", ".join(f"customer {route[pos].index} late by {round(-refill_slack[pos], 1)}"
+                                 for pos in range(lo[empty], hi[empty] + 1))
+                result["attempts"][n_trips] = (f"refill {empty} must be at positions {lo[empty]}..{hi[empty]} "
+                                               f"and no position can take a refill on time ({late})")
+                if n_trips == m:
+                    pos = max(range(lo[empty], hi[empty] + 1), key=lambda p: refill_slack[p])
+                    result["blocked"] = (pos, route[pos].index, -refill_slack[pos])
+            else:
+                result["attempts"][n_trips] = f"window {empty} is empty"
             continue
-        #labels: (trips started, start position of current trip) -> [(finish time, cost, refill positions)]
+        #feasibility first: earliest finish per (trips started, start of the current trip)
+        fast = fastest_refill_plan(problem_instance, route, n_trips, lo, hi, can_refill, detours)
+        if not fast["feasible"]:
+            pos, late = fast["blocked"]
+            result["attempts"][n_trips] = (f"late at position {pos} (customer {route[pos].index}) by {round(late, 1)}"
+                                           if late < math.inf else f"no label reaches position {pos} within capacity")
+            if n_trips == m:
+                result["blocked"] = (pos, route[pos].index, late)
+            continue
+        result["attempts"][n_trips] = "feasible"
+        #cost: labels (trips started, start position of current trip) -> Pareto set of (finish time, cost, refills)
         labels = {}
         node = route[0]
-        detour, _ = refill_detour[0]
+        detour, _ = detours[0]
         arrival = problem_instance.depot.start_interval + t[0][node.index] + detour + transfer
-        if arrival <= node.end_interval:
-            add_label(labels, (1, 0), (max(arrival, node.start_interval) + node.unloading_time, unit*detour, (0,)))
+        add_label(labels, (1, 0), (max(arrival, node.start_interval) + node.unloading_time, unit*detour, (0,)))
         for pos in range(1, n):
-            if not labels:
-                break
             node = route[pos]
             drive = t[previous[pos]][node.index]
             new_labels = {}
@@ -239,8 +391,8 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
                             add_label(new_labels, (started, start),
                                       (max(arrival, node.start_interval) + node.unloading_time, cost, refills))
                     #refill before this customer: start trip number `started`
-                    if started < n_trips and lo[started] <= pos <= hi[started]:
-                        detour, _ = refill_detour[pos]
+                    if started < n_trips and lo[started] <= pos <= hi[started] and can_refill[pos]:
+                        detour, _ = detours[pos]
                         arrival = finish + drive + detour + transfer
                         if arrival <= node.end_interval:
                             add_label(new_labels, (started + 1, pos),
@@ -249,23 +401,48 @@ def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
             result["labels"] += sum(len(front) for front in new_labels.values())
             labels = new_labels
         complete = [label for (started, start), front in labels.items() if started == n_trips for label in front]
-        if complete:
-            finish, cost, refills = min(complete, key=lambda x: (x[1], x[0]))
-            total = fixed_cost + cost + n_trips*problem_instance.trip_unit_cost
-            if best is None or total < best[1] - 1e-9:
-                best = (n_trips, total, finish, refills)
+        finish, cost, refills = min(complete, key=lambda x: (x[1], x[0]))
+        total = fixed_cost + cost + n_trips*problem_instance.trip_unit_cost
+        if best is None or total < best[1] - 1e-9:
+            best = (n_trips, total, finish, refills)
 
     if best is not None:
         n_trips, total, finish, refills = best
         result.update(feasible=True, n_trips=n_trips, cost=total, finish=finish,
                       transfer_cost=total - fixed_cost, #detours + refills: what street_problem_MIP returns as cost
                       refills=[route[pos].index for pos in refills],
-                      satellites={route[pos].index: refill_detour[pos][1] for pos in refills})
+                      satellites={route[pos].index: detours[pos][1] for pos in refills})
     return result
+
+#route check in front of / instead of the street MIP:
+#  "dp"  -> optimal_transshipment_checking (same plan and cost as the MIP, no solver)
+#  "mip" -> MathModels.street_problem_MIP
+ROUTE_CHECK = "dp"
+
+def check_route_transshipments(problem_instance, route):
+    """
+    Transshipment plan of ONE fixed route, the street_problem_MIP interface:
+    (feasible, cost, visits, route) with cost = unit travel cost of the detours
+    + trip_unit_cost per transshipment and visits = [[customer, satellite], ...] in route order.
+    An infeasible route returns (False, MathModels.bigNumber, [], []) and goes to the tabu list
+    when the tabu search is active (as the MIP does).
+    """
+    if ROUTE_CHECK == "mip":
+        return check_route_transshipments(problem_instance, route)
+    if len(route) == 0:
+        return True, 0, [], route
+    result = optimal_transshipment_checking(problem_instance, route)
+    if result["feasible"]:
+        visits = [[i, result["satellites"][i]] for i in result["refills"]]
+        return True, result["transfer_cost"], visits, route
+    if not problem_instance.consolidated and problem_instance.tabu_search_active:
+        if not is_in_tabu_list(problem_instance, route):
+            problem_instance.tabu_list.append([x.index for x in route])
+    return False, MathModels.bigNumber, [], []
 
 def mip_checking(problem_instance, route):
 
-    feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+    feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
      #visit [i,p]
     if feasibility:
         transfer_points = [visit[0] for visit in visits ]   
@@ -680,22 +857,28 @@ def is_route_feasible(problem_instance, route):
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[0][route[0].index] #return to depot and departure from depot
 
     if REFILL_RULE in ("optimal", "optimal_cost"):
-        #refill points chosen by the DP: minimum transshipments ("optimal") or cost optimal ("optimal_cost")
+        #refill points chosen by the DP: minimum transshipments ("optimal") or the bounded DP
+        #("optimal_cost": minimum first, more when needed or cheaper; the street MIP's plan)
         optimal = (bothway_optimal_checking(problem_instance, route) if REFILL_RULE == "optimal"
                    else optimal_transshipment_checking(problem_instance, route))
         if not optimal["feasible"]:
             return False, route, BigNumber
-        trans_points = []
-        current_time = optimal["finish"]
-        route_to_replay = []
-    else:
-        trans_points = refill_points(problem_instance, route)
-        current_time = problem_instance.depot.start_interval #vehicles leave the garage as early as needed
-        route_to_replay = route
+        #the street MIP has no constraint on the return to the garage, so the finish time of the
+        #plan is not checked against the garage end (unbounded vehicle time)
+        if problem_instance.mvrp:
+            if ROUTE_CHECK == "dp":
+                return True, route, optimal["transfer_cost"] #the plan is the MIP's: detours + refills
+            feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
+            return feas, route, cost
+        #exact travel + transshipment cost of the route (vehicle cost excluded, as get_min_multi_trip_cost)
+        return True, route, optimal["cost"] - problem_instance.cost_vehicle_use
+
+    trans_points = refill_points(problem_instance, route)
+    current_time = problem_instance.depot.start_interval #vehicles leave the garage as early as needed
 
     prev_node_index = 0
     # Calculate penalties for arriving late
-    for ind, node in enumerate(route_to_replay):
+    for ind, node in enumerate(route):
         #first node is always a transfer point, so add transfer time if it's the first node
         current_time += problem_instance.closest_satellite_network.distance_matrix[prev_node_index][node.index]            
         if node.index in trans_points: #transfer point
@@ -724,7 +907,7 @@ def is_route_feasible(problem_instance, route):
     
     
     if problem_instance.mvrp:        
-        feas, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+        feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         
     else:
         cost = get_min_multi_trip_cost(problem_instance, route)
@@ -746,7 +929,7 @@ def remove_infeasible_nodes_slack(problem_instance, route):
         removed = False
         if len(pool) + len(route) != initial_served:
             print("stop")
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         if feasibility:
             if not is_feasible_list(problem_instance, route):
                 problem_instance.feasible_list.append([x.index for x in route])
@@ -758,7 +941,7 @@ def remove_infeasible_nodes_slack(problem_instance, route):
         node =[x for x in route if x.index == ii][0]       
         sequence_init = [problem_instance.customers[x.index] for x in route if x.index != ii]
         #sequence_init.pop(ii)
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, sequence_init)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, sequence_init)
             
         if not feasibility:            
             route.remove(node)
@@ -773,7 +956,7 @@ def remove_infeasible_nodes_binary(problem_instance, route, pool = []):
     #loop breaking
     removed_bef = [x.index for x in pool]
     route = [x for x in route if x.index not in removed_bef] #remove the nodes removed before
-    feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+    feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
     if feasibility:
         return pool #breaking point for the recurive function
     
@@ -798,7 +981,7 @@ def remove_infeasible_nodes_binary(problem_instance, route, pool = []):
             route = [x for x in route if x.index not in removed_bef]
 
             
-            feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+            feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
             if feasibility:
                 return pool #breaking point for the recurive function
         
@@ -810,7 +993,7 @@ def remove_infeasible_nodes_binary(problem_instance, route, pool = []):
             continue
         sequence_init = copy.deepcopy(route[:ii+1])
         #sequence_init.pop(ii)
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, sequence_init)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, sequence_init)
         if not feasibility:                
             route.remove(node)
             pool.append(node)                
@@ -835,7 +1018,7 @@ def remove_infeasible_nodes(problem_instance, route):
         divisions = set(divisions)
         for length in divisions:
             seq_left = route[:length]
-            feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, seq_left)
+            feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, seq_left)
             if feasibility:
                 start = length
             else:
@@ -846,7 +1029,7 @@ def remove_infeasible_nodes(problem_instance, route):
         removed = False
         if len(pool) + len(route) != initial_served:
             print("stop")
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         if feasibility:
             if not is_feasible_list(problem_instance, route):
                 problem_instance.feasible_list.append([x.index for x in route])
@@ -859,7 +1042,7 @@ def remove_infeasible_nodes(problem_instance, route):
                 continue
             sequence_init = copy.deepcopy(route[:ii+1])
             #sequence_init.pop(ii)
-            feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, sequence_init)
+            feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, sequence_init)
             if not feasibility:                
                 route.remove(node)
                 pool.append(node)                
@@ -1048,7 +1231,7 @@ def check_feasibility(problem_instance,  routes,  VRP_only = True, multi_trip = 
        
     elif multi_trip:
         if single_route_MVRP: #SINGLE - PARTIAL MVRP
-            feasibility, cost, visits, routes = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, routes) #single array is sent
+            feasibility, cost, visits, routes = check_route_transshipments(problem_instance, routes) #single array is sent
             return feasibility, cost
         else: #COMPLETE MVRP
             return check_MVRP_solution(problem_instance, routes)
@@ -1063,7 +1246,7 @@ def check_multi_trips(problem_instance, routes):
     for route in routes: 
         newRoute = sev.street_vehicle()
         newRoute.sequence.extend(route)
-        feasibility, cost, visits, route = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route) #single array is sent
+        feasibility, cost, visits, route = check_route_transshipments(problem_instance, route) #single array is sent
         newRoute.cost = cost
         newRoute.visits = visits
         newRoute.is_feasible = feasibility
@@ -1138,14 +1321,14 @@ def check_MVRP_solution(problem_instance, routes):
     #remove infeasible nodes
     for route in routes:
         demand_to_supply += sum([x.demand for x in route])
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         if not feasibility:            
             pool = remove_infeasible_nodes(problem_instance, route)
             infeasible_nodes.extend(pool)
             route = [x for x in route if x not in pool]
 
             if route:                
-                feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
+                feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
                 if feasibility:
                     newRoute = sev.street_vehicle()
                     newRoute.sequence.extend(route) 
@@ -1182,7 +1365,7 @@ def check_MVRP_solution(problem_instance, routes):
         if not infeasible_nodes: #feasible
             assignments = []    
             for route in routes:
-                feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance,  problem_instance.timelimit_SEmodel, route)
+                feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
                 if not feasibility:
                     final_solution.is_feasible = False
                     return final_solution
@@ -1256,7 +1439,7 @@ def check_2EVRP_solution(problem_instance, multi_trip_solution, remove_satellite
     #remove below after verifying feasibility of multi trip solution any time called
     hasks = []
     for route in routes:
-        feasibility, cost, visits, route_return = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
+        feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         hasks.append(visits)
         if not feasibility:
             print("infeasible solution for multi-trip") #normally should not happen since it is checked before

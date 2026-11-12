@@ -618,6 +618,9 @@ def select_seed_customers(problem_instance, nstart = 5):
 
     return seed_customer_list
 
+#multi_start_initial: repair + store every constructed start (True) or only the best one (False)
+REPAIR_ALL_STARTS = False
+
 def multi_start_initial(problem_instance, nstart = 5, report_initials = False, last_route = []):
         
     start_time = time.time()
@@ -651,10 +654,20 @@ def multi_start_initial(problem_instance, nstart = 5, report_initials = False, l
     if report_initials:
         report_initial_solutions_stats(problem_instance, initial_solutions, runtime_all)
     
-    
-    solution_best_constructed =  RH.check_feasibility(problem_instance, initial_solutions[0][3],VRP_only = False, multi_trip=True, single_route_MVRP = False)
-
-    return solution_best_constructed #, initial_solutions
+    #multi-trip (MVRP) check with repair of the infeasible routes: the best constructed route set
+    #only, or every start (REPAIR_ALL_STARTS): each repaired set is stored in
+    #problem_instance.heuristics_solutions, so check_found_solutions evaluates all of them at the
+    #two-echelon level and the best FE objective wins, not the best street objective
+    checked = []
+    for start, n_routes, cost, routes in (initial_solutions if REPAIR_ALL_STARTS else initial_solutions[:1]):
+        solution_mvrp = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip=True, single_route_MVRP = False)
+        checked.append(solution_mvrp)
+    problem_instance.constructed_solutions = checked
+    feasible = [s for s in checked if s.is_feasible]
+    if feasible:
+        feasible.sort(key=lambda s: (s.nSEVs, s.objective))
+        return feasible[0]
+    return checked[0]
 
 def get_initial_solution(problem_instance, nof_initializations = 1, read_initials = False):    
 
