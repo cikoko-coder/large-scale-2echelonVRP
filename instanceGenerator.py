@@ -7,9 +7,10 @@ import time
 from pathlib import Path
 from os import walk
 import csv
-import FLP_scenarios as FLP
 import pandas as pd
-import Repair_heuristcs as RH
+# NOTE: FLP_scenarios and Repair_heuristcs are imported lazily inside the
+# use-case functions that need them, so that benchmark loading does not pull in
+# the heuristics (and their solver dependencies).
 
 bigNumber = 100000000
 
@@ -516,6 +517,7 @@ class instance:
 
         return
 def read_initial_case(problem):
+    import Repair_heuristcs as RH
     best_initial_routes = RH.read_initial_SEV_routes_use_case(problem, "initial_300.txt")
     min_SEVS = RH.get_makespan(problem, best_initial_routes[0])
     best_initial_routes = RH.divide_routes(problem, best_initial_routes[0], min_SEVS)
@@ -617,6 +619,7 @@ def readGenerate_benchmark(instance_name, size):
     return problem 
 
 def read_nodes(nof_horeca, nof_satellites, scenario, demand_set=1):
+    import FLP_scenarios as FLP
     projectPath = os.path.dirname(os.path.abspath(__file__))
     files_use_case = projectPath+"/usecase/"
 
@@ -723,6 +726,7 @@ def read_generate_case(demand_set = 1, nof_horeca = 1600, nof_satellites = 10, s
     return problem 
 
 def check_feasibility_all_nodes(problem):
+    import Repair_heuristcs as RH
     removed = []
     
     for ii,node in enumerate(problem.network):
