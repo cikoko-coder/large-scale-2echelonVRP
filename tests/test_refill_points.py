@@ -293,7 +293,7 @@ def test_route_check_wrapper_has_the_mip_interface():
         res = RH.optimal_transshipment_checking(problem, route)
         assert feasible == res["feasible"]
         if feasible:
-            assert cost == pytest.approx(res["transfer_cost"])
+            assert cost == pytest.approx(res["cost"] - problem.cost_vehicle_use)
             assert [i for i, p in visits] == res["refills"]
             assert all(p == res["satellites"][i] for i, p in visits)
             assert route_back is route and problem.tabu_list == []

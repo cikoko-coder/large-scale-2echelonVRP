@@ -42,7 +42,7 @@ def test_dp_equals_street_mip_on_random_subsequences(problem):
         assert dp["feasible"] == mip_feasible, [n.index for n in route]
         if mip_feasible:
             feasible += 1
-            assert dp["transfer_cost"] == pytest.approx(mip_cost, abs=1e-3)
+            assert dp["cost"] - problem.cost_vehicle_use == pytest.approx(mip_cost, abs=1e-3)
             assert len(dp["refills"]) == len(mip_visits)
     assert feasible >= 10
 
@@ -60,7 +60,7 @@ def test_route_needing_an_extra_transshipment(problem):
     assert minimum["blocked"][1] in (32, 33)
     mip_feasible, mip_cost, mip_visits, _ = MathModels.street_problem_MIP(problem, 50, route)
     assert mip_feasible and len(mip_visits) == 5
-    assert bounded["transfer_cost"] == pytest.approx(mip_cost, abs=1e-3)
+    assert bounded["cost"] - problem.cost_vehicle_use == pytest.approx(mip_cost, abs=1e-3)
     assert RH.is_route_feasible(problem, route)[0]
 
 

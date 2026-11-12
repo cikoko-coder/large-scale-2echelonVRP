@@ -114,10 +114,16 @@ def test_runconfig_roundtrip(tmp_path):
     assert json.loads(p.read_text())["model"]["synchronized"] is False
 
 
-def test_resolve_costs_defaults_to_shift_length():
-    problem = SimpleNamespace(depot=SimpleNamespace(start_interval=0, end_interval=480),
-                              CDC=SimpleNamespace(start_interval=60, end_interval=1000))
-    c = resolve_costs(problem, CostConfig())
-    assert c["beta_SE"] == 480.0 and c["beta_FE"] == 940.0
-    c = resolve_costs(problem, CostConfig(beta_SE=10, beta_FE=20))
-    assert c["beta_SE"] == 10.0 and c["beta_FE"] == 20.0
+def test_resolve_costs_defaults_to_the_paper_fixed_cost():
+    """eq. (62): beta = max_{i,p} c^s (t_gi + t_ip + t_pg) + c^w (t_dp + t_pd); beta^w = alpha beta."""
+    # nodes: 0 garage, 1-2 customers, 3 satellite, 4 CDC
+    t = [[0, 10, 20, 5, 99], [10, 0, 15, 8, 99], [20, 15, 0, 30, 99], [5, 8, 30, 0, 7], [99, 99, 99, 7, 0]]
+    problem = SimpleNamespace(travel_matrix=t, depot=SimpleNamespace(index=0), CDC=SimpleNamespace(index=4),
+                              customers=[SimpleNamespace(index=1), SimpleNamespace(index=2)],
+                              satellites=[SimpleNamespace(index=3)])
+    c = resolve_costs(problem, CostConfig(), wls=0.1)
+    beta = 1.0*(20 + 30 + 5) + 0.1*(7 + 7)  # customer 2 is the most expensive
+    assert c["beta_SE"] == pytest.approx(beta) and c["beta_FE"] == pytest.approx(0.1*beta)
+    assert c["c_SE"] == 1.0 and c["c_FE"] == pytest.approx(0.1)
+    c = resolve_costs(problem, CostConfig(beta_SE=10, beta_FE=20, c_FE=2.0))
+    assert c["beta_SE"] == 10.0 and c["beta_FE"] == 20.0 and c["c_FE"] == 2.0

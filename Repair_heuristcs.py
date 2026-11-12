@@ -422,8 +422,9 @@ ROUTE_CHECK = "dp"
 def check_route_transshipments(problem_instance, route):
     """
     Transshipment plan of ONE fixed route, the street_problem_MIP interface:
-    (feasible, cost, visits, route) with cost = unit travel cost of the detours
-    + trip_unit_cost per transshipment and visits = [[customer, satellite], ...] in route order.
+    (feasible, cost, visits, route) with cost = the street travel cost of the route, c^s *
+    (distance + detours) + trip_unit_cost per transshipment (no vehicle cost), and
+    visits = [[customer, satellite], ...] in route order.
     An infeasible route returns (False, MathModels.bigNumber, [], []) and goes to the tabu list
     when the tabu search is active (as the MIP does).
     """
@@ -434,7 +435,7 @@ def check_route_transshipments(problem_instance, route):
     result = optimal_transshipment_checking(problem_instance, route)
     if result["feasible"]:
         visits = [[i, result["satellites"][i]] for i in result["refills"]]
-        return True, result["transfer_cost"], visits, route
+        return True, result["cost"] - problem_instance.cost_vehicle_use, visits, route
     if not problem_instance.consolidated and problem_instance.tabu_search_active:
         if not is_in_tabu_list(problem_instance, route):
             problem_instance.tabu_list.append([x.index for x in route])
@@ -867,7 +868,7 @@ def is_route_feasible(problem_instance, route):
         #plan is not checked against the garage end (unbounded vehicle time)
         if problem_instance.mvrp:
             if ROUTE_CHECK == "dp":
-                return True, route, optimal["transfer_cost"] #the plan is the MIP's: detours + refills
+                return True, route, optimal["cost"] - problem_instance.cost_vehicle_use #the plan is the MIP's
             feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
             return feas, route, cost
         #exact travel + transshipment cost of the route (vehicle cost excluded, as get_min_multi_trip_cost)
@@ -1468,7 +1469,9 @@ def check_2EVRP_solution(problem_instance, multi_trip_solution, remove_satellite
     final_solution.travelTotal = round(final_solution.travelStreet + final_solution.travelWater, 2)
     final_solution.water_used_arcs = used_arcs #operation sequence (temporal location)
     final_solution.routes_fevs = locations_arcs #satellite sequence (spatial location)
-    final_solution.objective = final_solution.travelStreet + final_solution.travelWater + problem_instance.cost_vehicle_use*(final_solution.nSEVs + final_solution.nFEVs)
+    final_solution.objective = (final_solution.travelStreet + final_solution.travelWater
+                                + problem_instance.cost_vehicle_use*final_solution.nSEVs
+                                + problem_instance.cost_vehicle_use_FEV*final_solution.nFEVs) #eq. (1): z^s + z^w
     final_solution.checked_optimality = True
 
     routes =  FEVmodels.get_routes(problem_instance, used_arcs)

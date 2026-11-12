@@ -156,3 +156,26 @@ distance still does not enter the choice (see the open item below).
 * `ProblemGenerator` uses vehicle cost 32400, `instanceGenerator` 10000.
 * `twoe.config.resolve_costs` gives an infinite FE shift now that the CDC opens at -inf.
 * Street MIP `MIPGap = 1e-4` returns slightly suboptimal transshipment plans; irrelevant with the DP.
+
+## 6. Paper reference: Karademir, Beirigo & Atasoy, EJOR 322 (2025) 480-499
+
+Parameters now follow Section 5.1 (`COST_SETTING = "paper"`, `WLS = 0.1` in the pipeline;
+`instance.set_paper_costs(wls)`):
+
+| paper | code |
+|---|---|
+| c^s = 1, c^w = alpha c^s (WLS 1:10, alpha = 0.1) | `cost_unit_travel`, `cost_unit_travel_FEV` (the water MIP now uses the FE costs) |
+| beta = max_{i,p} c^s (t_gi + t_ip + t_pg) + c^w (t_dp + t_pd), eq. (62); beta^w = alpha beta | `twoe.config.fixed_vehicle_cost`, `cost_vehicle_use`, `cost_vehicle_use_FEV` |
+| no cost per transshipment | `trip_unit_cost = 0` (the DP then also tries K > m when it saves distance) |
+| U = 2 x average service time, rounded up | `set_transfer_duration` (c: 180, r/rc: 20) |
+| objective (1): z^s + z^w with travel on both levels | route cost = c^s (distance + detours) + trips; two-echelon objective uses beta^w for vessels |
+
+Still different from the paper: 8 satellites from the data files (paper: 4 at proximity 0.1
+or k-means), unbounded vehicle time instead of the latest-return rule, satellites fixed to the
+closest one in the water subproblem. Six benchmarks with paper costs: all get a two-echelon
+solution (objectives 1897-3282, 3-5 LEFVs, 1-4 vessels), DP and MIP agree on all 101 routes.
+
+LBBD elements already in the heuristic (kept as reference, not implemented as B&C): master =
+street routes with the closest-satellite relaxation (M, eq. 42-47), subproblem = water MIP
+with synchronization (S), tabu list = no-good feasibility cut (59), cutoff = incumbent bound,
+multiple initial solutions tested by S (Sec. 4.3.3). Next: the large-scale iterated heuristic.

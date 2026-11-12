@@ -35,6 +35,8 @@ RANDOM_SEED = 32           # same seed rule as Solve_by_decomposition: seed + it
 LOG_MIP_CALLS = True       # count every Gurobi solve (model name, status) during the run
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
+COST_SETTING = "paper"     # "paper": costs of Karademir et al. (EJOR 2025) Sec. 5.1 with the ratio WLS; "code": 10000 constants
+WLS = 0.1                  # water level significance alpha (WLS 1:10 -> 0.1): c^w = alpha c^s, beta^w = alpha beta
 ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
 REFILL_RULE = "optimal_cost"  # route check rule: "optimal_cost" (bounded DP) or "optimal" (exactly the minimum)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
@@ -211,10 +213,11 @@ def trace_route_check(problem, route):
         #expensive than the optimum (about 4 cost units at 40000); the DP is exact
         gap = 1e-4*(abs(cost) + problem.cost_vehicle_use + sum(
             problem.travel_matrix[a][b] for a, b in zip([0] + [n.index for n in route], [n.index for n in route] + [0])))
+        dp_cost = bounded["cost"] - problem.cost_vehicle_use #route travel cost, as the MIP returns it
         info["mip_agrees"] = (feasible == bounded["feasible"]
-                              and (not feasible or bounded["transfer_cost"] <= cost + 1e-3))
-        info["mip_within_gap"] = feasible and bounded["feasible"] and cost - bounded["transfer_cost"] > 1e-3 \
-            and cost - bounded["transfer_cost"] <= gap + 1e-3
+                              and (not feasible or dp_cost <= cost + 1e-3))
+        info["mip_within_gap"] = feasible and bounded["feasible"] and cost - dp_cost > 1e-3 \
+            and cost - dp_cost <= gap + 1e-3
         if feasible:
             satellite_of = {i: p for i, p in visits}
             rows2, violation2, _ = replay_route_timeline(problem, route, info["mip_transfers"], satellite_of)
@@ -294,7 +297,8 @@ def build_problem(instance_name: str, reports: dict):
     """Generate the instance and set the run parameters (shared by every stage)."""
     if BENCHMARK_MODE:
         problem = instanceGenerator.readGenerate_benchmark(instance_name, 100,
-                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME)
+                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME,
+                                                           cost_setting=COST_SETTING, wls=WLS)
     else:
         problem = instanceGenerator.read_generate_case(
             DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES,
@@ -341,8 +345,11 @@ def run_initial_construction(instance_name: str, reports: dict):
     emit(f"customers {len(problem.customers)}, satellites {len(problem.satellites)}, "
          f"SEV capacity {problem.capacity_SEV}, FEV capacity {problem.capacity_FEV}, "
          f"synchronized {problem.synch_check}")
-    emit(f"vehicle use cost SE {problem.cost_vehicle_use}, FE {problem.cost_vehicle_use_FEV}, "
-         f"street MIP time limit {problem.timelimit_SEmodel}s, min vessels bound {problem.minVessel_bound}")
+    emit(f"costs ({getattr(problem, 'cost_setting', 'code')}): c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
+         f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
+         f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
+    emit(f"street MIP time limit {problem.timelimit_SEmodel}s, water MIP time limit {problem.timelimit_FEmodel}s, "
+         f"min vessels bound {problem.minVessel_bound}")
     customer_windows = [(node.start_interval, node.end_interval) for node in problem.customers]
     emit(f"customer windows: earliest open {min(e for e, l in customer_windows)}, latest close {max(l for e, l in customer_windows)}")
     emit(f"vehicle time: unbounded {problem.unbounded_vehicle_time}, garage [{problem.depot.start_interval}, {problem.depot.end_interval}], "

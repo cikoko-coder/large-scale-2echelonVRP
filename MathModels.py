@@ -436,8 +436,8 @@ def solve_MIP(problem, model,timelimit, solution_in, route_return = False):
             exit()
 
         
-        #transfer-satellite assignments #returning the travel costs not the objective
-        return True,  lead_time_cost + problem.trip_unit_cost*len(satellite_visits), satellite_visits, route_return 
+        #street travel cost of the route(s): distance + detours (lead times) + transshipments, no vehicle cost
+        return True,  distance_travel_cost + lead_time_cost + problem.trip_unit_cost*len(satellite_visits), satellite_visits, route_return 
 
     else:
         #model.computeIIS()
