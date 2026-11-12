@@ -13,47 +13,11 @@ import os
 BigNumber = 1000000
 def bothway_checking(problem_instance, route):
     """
-    Finds node indices where a refill is required.
-    :param demands: List of loads for each node (e.g., [2, 5, 8, 3])
-    :param capacity: Maximum vehicle capacity Q
-    :return: List of indices where the vehicle takes a break to refill
+    Refill points of the greedy trip split in both directions.
+    :return: (forward, backward), each a list of refill node indices in route order
+             (route[0] first, it is always a refill)
     """
-    demands = [node.demand for node in route]
-    capacity = problem_instance.capacity_SEV
-    
-    
-    total_demand = sum(demands)
-    min_refills = math.ceil(total_demand / capacity)    
-
-    list_ind = [node.index for node in route]
-    first_node = route[0].index
-
-    if min_refills > 1:
-        for check in range(2):
-            if check == 0:
-                refill_indices = []
-                forward = refill_indices
-            else:
-                demands.reverse()
-                list_ind.reverse()
-                refill_indices = []
-                backward = refill_indices
-            current_load =  0    
-            for i, demand in enumerate(demands):            
-                # If adding this node exceeds current capacity, refill first
-                if current_load + demand > capacity:
-                    refill_indices.append(list_ind[i])
-                    # After refilling, the load is just the current node's demand
-                    current_load = demand
-                else:
-                    # Continue adding to the current "bin"
-                    current_load += demand
-            if first_node not in refill_indices:
-                refill_indices.insert(0, first_node) #first node is always a refill  
-    else:
-        forward, backward = [route[0].index], [route[0].index] #first node is always a refill and the only one if needed
-
-    return forward, backward
+    return forward_checking(problem_instance, route), backward_checking(problem_instance, route)
 
 def forward_checking(problem_instance, route):
     """
@@ -90,30 +54,39 @@ def forward_checking(problem_instance, route):
     return refill_indices
 
 def backward_checking(problem_instance, route):
-    demands = [node.demand for node in route]
+    """
+    Refill points from a greedy split that starts at the END of the route.
+
+    Scanning backwards, a node whose demand would overflow the current trip closes that
+    trip: it is the LAST node of the chronologically earlier trip, so the refill happens
+    just before its successor. Every trip is filled from its end, so the refills come as
+    early as possible (forward_checking places them as late as possible); both give the
+    minimum number of trips.
+    :return: refill node indices in route order (route[0] first, it is always a refill)
+    """
+    if not route:
+        return []
     capacity = problem_instance.capacity_SEV
-    # Reverse the list to process backward
-    rev_demands = demands[::-1]
-    n = len(demands)
-    
-    refill_indices_rev = []
+    cut_positions = [] #positions where a new trip starts
     current_load = 0
-    
-    for i, demand in enumerate(rev_demands):
-        
+    for pos in range(len(route) - 1, -1, -1):
+        demand = route[pos].demand
         if current_load + demand > capacity:
-            # This node triggers a 'refill' in the backward flow
-            # The actual node index in the original list is (n - 1 - i)
-            refill_indices_rev.append(route[n - 1 - i].index)
+            cut_positions.append(pos + 1) #refill before the successor
             current_load = demand
         else:
             current_load += demand
-            
-    # Reverse the results to keep them in chronological order (0 -> N)
-    refill_indices_rev.reverse()
-    if route[0].index not in refill_indices_rev:
-        refill_indices_rev.insert(0, route[0].index) #first node is always a refill
-    return refill_indices_rev
+    cut_positions.sort()
+    return [route[0].index] + [route[pos].index for pos in cut_positions]
+
+#refill rule used by the relaxed route check (is_route_feasible): "backward" or "forward"
+REFILL_RULE = "backward"
+
+def refill_points(problem_instance, route):
+    """Refill (transfer) points assumed by the relaxed route check, see REFILL_RULE."""
+    if REFILL_RULE == "forward":
+        return forward_checking(problem_instance, route)
+    return backward_checking(problem_instance, route)
 
 def mip_checking(problem_instance, route):
 
@@ -531,7 +504,7 @@ def is_route_feasible(problem_instance, route):
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[route[-1].index][0] 
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[0][route[0].index] #return to depot and departure from depot
 
-    trans_points = forward_checking(problem_instance, route) 
+    trans_points = refill_points(problem_instance, route) 
     
     current_time = problem_instance.depot.start_interval #vehicles leave the garage as early as needed
     prev_node_index = 0
