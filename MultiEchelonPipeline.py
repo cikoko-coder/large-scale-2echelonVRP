@@ -168,8 +168,8 @@ def trace_route_check(problem, route):
 
     rows, violation, end = replay_route_timeline(problem, route, info["heuristic_transfers"])
     info["rows"], info["violation"], info["end"] = rows, violation, end
-    if RH.REFILL_RULE == "optimal" and not info["relaxed_feasible"] and info["makespan_vehicles"] <= 1 and not info["tabu"]:
-        info["reason"] = "no refill plan is within capacity and on time (bothway optimal DP)"
+    if RH.REFILL_RULE in ("optimal", "optimal_cost") and not info["relaxed_feasible"] and info["makespan_vehicles"] <= 1 and not info["tabu"]:
+        info["reason"] = f"no refill plan is within capacity and on time (refill DP, rule {RH.REFILL_RULE})"
     elif info["makespan_vehicles"] > 1:
         info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
     elif info["tabu"]:

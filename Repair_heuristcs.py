@@ -80,7 +80,10 @@ def backward_checking(problem_instance, route):
     return [route[0].index] + [route[pos].index for pos in cut_positions]
 
 #refill rule used by the relaxed route check (is_route_feasible):
-#  "optimal"  -> bothway_optimal_checking (DP between the backward and forward bounds)
+#  "optimal"      -> bothway_optimal_checking: minimum number of transshipments, best refill
+#                    points between the backward and forward bounds (DP)
+#  "optimal_cost" -> optimal_transshipment_checking: adds transshipments until the travel cost
+#                    is optimal (same solution as the street MIP)
 #  "backward" / "forward" -> fixed greedy refill points
 REFILL_RULE = "optimal"
 
@@ -90,6 +93,8 @@ def refill_points(problem_instance, route):
         return forward_checking(problem_instance, route)
     if REFILL_RULE == "optimal":
         return bothway_optimal_checking(problem_instance, route)["refills"]
+    if REFILL_RULE == "optimal_cost":
+        return optimal_transshipment_checking(problem_instance, route)["refills"]
     return backward_checking(problem_instance, route)
 
 def refill_windows(problem_instance, route, n_trips, forward = None, backward = None):
@@ -119,7 +124,19 @@ def refill_windows(problem_instance, route, n_trips, forward = None, backward = 
     lo[0] = hi[0] = 0
     return lo, hi
 
-def bothway_optimal_checking(problem_instance, route, max_trips = None):
+def bothway_optimal_checking(problem_instance, route):
+    """
+    Route feasibility with the MINIMUM number of transshipments m = number of trips of the
+    greedy split: the k-th refill lies between the backward (earliest) and forward (latest)
+    greedy positions, backward[k] <= c_k <= forward[k], and the DP picks the best refill
+    points inside these windows (cheapest detours, on time, within capacity).
+    A route that needs more than m transshipments to be on time is rejected here; see
+    optimal_transshipment_checking for the cost-optimal number of transshipments.
+    :return: same dict as optimal_transshipment_checking
+    """
+    return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
+
+def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
     """
     Optimal refill (transfer) points of a fixed street route: dynamic programming in the
     windows between the backward (earliest) and forward (latest) greedy refill positions.
@@ -135,7 +152,8 @@ def bothway_optimal_checking(problem_instance, route, max_trips = None):
              + trip_unit_cost per refill   (the MIP objective for one route).
     The number of trips K starts at the minimum m and grows (more refills can be needed to
     use satellites that are on the way) until the cost lower bound of K trips exceeds the
-    best cost found. Labels: per (trips started, start of the current trip) the Pareto set
+    best cost found; extra_trips limits K to m + extra_trips (0: minimum transshipments only,
+    None: no limit, the street MIP's optimum). Labels: per (trips started, start of the current trip) the Pareto set
     of (finish time, cost); only refill positions inside the windows are expanded.
 
     :return: dict with feasible, refills (customer indices), satellites ({customer: satellite}),
@@ -181,7 +199,7 @@ def bothway_optimal_checking(problem_instance, route, max_trips = None):
     forward = [where[i] for i in forward_checking(problem_instance, route)]
     backward = [where[i] for i in backward_checking(problem_instance, route)]
     m = len(forward)
-    max_trips = n if max_trips is None else min(n, max_trips)
+    max_trips = n if extra_trips is None else min(n, m + extra_trips)
 
     def add_label(labels, key, label):
         front = labels.setdefault(key, [])
@@ -661,9 +679,10 @@ def is_route_feasible(problem_instance, route):
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[route[-1].index][0] 
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[0][route[0].index] #return to depot and departure from depot
 
-    if REFILL_RULE == "optimal":
-        #refill points chosen optimally between the backward and forward bounds (same rules as the street MIP)
-        optimal = bothway_optimal_checking(problem_instance, route)
+    if REFILL_RULE in ("optimal", "optimal_cost"):
+        #refill points chosen by the DP: minimum transshipments ("optimal") or cost optimal ("optimal_cost")
+        optimal = (bothway_optimal_checking(problem_instance, route) if REFILL_RULE == "optimal"
+                   else optimal_transshipment_checking(problem_instance, route))
         if not optimal["feasible"]:
             return False, route, BigNumber
         trans_points = []

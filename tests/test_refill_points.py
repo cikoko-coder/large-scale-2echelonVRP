@@ -79,8 +79,8 @@ def random_instance(rng, n):
     return problem, customers
 
 
-def brute_force(problem, route):
-    """Every set of refill positions (position 0 always refills)."""
+def brute_force(problem, route, n_refills=None):
+    """Every set of refill positions (position 0 always refills); n_refills fixes their number."""
     import itertools
     t, n = problem.travel_matrix, len(route)
     prev = [0] + [node.index for node in route[:-1]]
@@ -89,6 +89,8 @@ def brute_force(problem, route):
     best = None
     for mask in itertools.product([0, 1], repeat=n - 1):
         cuts = [0] + [k + 1 for k, b in enumerate(mask) if b]
+        if n_refills is not None and len(cuts) != n_refills:
+            continue
         bounds = cuts + [n]
         if any(sum(nd.demand for nd in route[bounds[k]:bounds[k + 1]]) > problem.capacity_SEV for k in range(len(cuts))):
             continue
@@ -107,13 +109,14 @@ def brute_force(problem, route):
     return best
 
 
-def test_optimal_dp_matches_brute_force():
+def test_cost_optimal_dp_matches_brute_force():
+    """optimal_transshipment_checking: any number of transshipments, cheapest plan."""
     rng = random.Random(11)
     checked = feasible = 0
     for _ in range(400):
         n = rng.randint(1, 11)
         problem, route = random_instance(rng, n)
-        res = RH.bothway_optimal_checking(problem, route)
+        res = RH.optimal_transshipment_checking(problem, route)
         bf = brute_force(problem, route)
         assert res["feasible"] == (bf is not None)
         if bf is not None:
@@ -138,3 +141,23 @@ def test_windows_contain_greedy_bounds():
         for extra in (1, 2):
             lo2, hi2 = RH.refill_windows(problem, route, min(len(route), len(fwd) + extra))
             assert all(a <= b for a, b in zip(lo2, hi2))
+
+
+def test_minimum_transshipment_dp_matches_brute_force():
+    """bothway_optimal_checking: exactly the minimum number of transshipments m."""
+    rng = random.Random(13)
+    feasible = infeasible = 0
+    for _ in range(400):
+        n = rng.randint(1, 11)
+        problem, route = random_instance(rng, n)
+        m = len(RH.forward_checking(problem, route))
+        res = RH.bothway_optimal_checking(problem, route)
+        bf = brute_force(problem, route, n_refills=m)
+        assert res["feasible"] == (bf is not None)
+        if bf is not None:
+            feasible += 1
+            assert res["n_trips"] == m
+            assert res["transfer_cost"] == pytest.approx(bf, abs=1e-6)
+        else:
+            infeasible += 1
+    assert feasible > 50 and infeasible > 50
