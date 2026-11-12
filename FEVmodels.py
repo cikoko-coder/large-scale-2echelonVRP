@@ -162,7 +162,7 @@ def add_objective(problem, model,tasks):
     distance_travel_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="distance_travel_cost") 
     model.update()
 
-    model.addConstr(fixed_vehicle_cost>=model._nofVessels*problem.cost_vehicle_use_FEV) #fixed, beta^w 
+    model.addConstr(fixed_vehicle_cost>=model._nofVessels*problem.cost_vehicle_use) #fixed 
     
     exp = LinExpr()
     
@@ -170,15 +170,15 @@ def add_objective(problem, model,tasks):
         i = taski.transfer_point
         loc_i = taski.index
         if [problem.CDC.index,i] in model._arcList:
-            exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[problem.CDC.index][loc_i], model._xij[problem.CDC.index,i])
+            exp.addTerms(problem.cost_unit_travel*problem.DistMatrix[problem.CDC.index][loc_i], model._xij[problem.CDC.index,i])
         if [i,problem.CDC.index] in model._arcList:
-            exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][problem.CDC.index], model._xij[i,problem.CDC.index])
+            exp.addTerms(problem.cost_unit_travel*problem.DistMatrix[loc_i][problem.CDC.index], model._xij[i,problem.CDC.index])
         
         for taskj in tasks:
             j = taskj.transfer_point
             loc_j = taskj.index
             if [i,j] in model._arcList:
-                exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][loc_j], model._xij[i,j])
+                exp.addTerms(problem.cost_unit_travel*problem.DistMatrix[loc_i][loc_j], model._xij[i,j])
             if loc_i != loc_j:
                 model._xij[i,j].Start = 0
 

@@ -502,38 +502,6 @@ class instance:
                     
         return
         
-    def set_transfer_duration(self, duration):
-        """Transfer (transshipment) duration U at the satellites, also their service time."""
-        self.TransferDuration = duration
-        for satellite in self.satellites:
-            satellite.unloading_time = duration
-        return
-
-    def set_paper_costs(self, wls = 0.1, c_s = 1.0, trip_unit_cost = 0.0, transfer_duration = None):
-        """
-        Cost parameters of Karademir, Beirigo & Atasoy (EJOR 2025, Section 5.1):
-        * c^s = c_s per time unit on the streets, c^w = alpha * c^s on the water, where
-          alpha = wls is the water level significance (WLS 1:10 -> wls = 0.1);
-        * beta^s = beta(c^s, c^w) = max_{i in C, p in P} c^s (t_gi + t_ip + t_pg) + c^w (t_dp + t_pd)
-          (eq. 62: the worst cost of serving one customer alone at both levels), beta^w = alpha * beta;
-        * no cost per transshipment (trip_unit_cost = 0; the vessel costs come from the water level);
-        * U = twice the average service duration of the customers, rounded up (transfer_duration
-          None), as in the benchmark generation of the paper.
-        """
-        from twoe.config import fixed_vehicle_cost
-        self.wls = wls
-        self.cost_unit_travel = c_s
-        self.cost_unit_travel_FEV = wls*c_s
-        beta = fixed_vehicle_cost(self, self.cost_unit_travel, self.cost_unit_travel_FEV)
-        self.cost_vehicle_use = beta
-        self.cost_vehicle_use_FEV = wls*beta
-        self.trip_unit_cost = trip_unit_cost
-        if transfer_duration is None:
-            transfer_duration = math.ceil(2*sum(node.unloading_time for node in self.customers)/len(self.customers))
-        self.set_transfer_duration(transfer_duration)
-        self.cost_setting = "paper"
-        return
-
     def set_unbounded_vehicle_time(self, horizon_factor = 2.0, vehicle_start = None):
         """Vehicle timing is left free; only the customer time windows bound the operations.
 
@@ -657,9 +625,7 @@ def read_horeca_data(file_content):
 
     return satellites
 
-def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True, cost_setting = "code", wls = 0.1):
-    """cost_setting "code": the constants of instance() (10000 per vehicle and per transshipment,
-    U = 0); "paper": instance.set_paper_costs(wls) (cost ratio WLS, beta of eq. 62, U)."""
+def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True):
     nodes, capacity_FEV, capacity_SEV = read_vrp_data(instance_name, size)
     problem = instance(instance_name, nodes)
     problem.depot = problem.nodes[0]
@@ -681,11 +647,6 @@ def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True, c
         problem.set_unbounded_vehicle_time()
     
     problem.distance_matrix = problem.DistMatrix
-
-    if cost_setting == "paper":
-        problem.set_paper_costs(wls)
-    else:
-        problem.cost_setting = "code"
 
     #read_best_known_solution(problem)
     total_demand = sum(x.demand for x in problem.nodes if x in problem.customers)
