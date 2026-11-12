@@ -292,6 +292,10 @@ class instance:
         self.removal_max = 300  
         self.tabu_search_active = True  
         self.consolidated = False
+        #vehicle timing (see set_unbounded_vehicle_time)
+        self.unbounded_vehicle_time = False
+        self.vehicle_start = 0
+        self.time_horizon = None
     
 
     def AddCDC(self):
@@ -498,6 +502,39 @@ class instance:
                     
         return
         
+    def set_unbounded_vehicle_time(self, horizon_factor = 2.0, vehicle_start = None):
+        """Vehicle timing is left free; only the customer time windows bound the operations.
+
+        The big-M values in the models are derived from the customer windows, so the
+        vehicle horizon only has to be "long enough":
+        * horizon end  T = horizon_factor * latest customer end   (garage, satellites, CDC)
+        * garage start = vehicle_start, by default the earliest departure that still lets a
+          vehicle reach any customer through any satellite before that customer opens
+          (-max_{p,j}(t_0p + t_pj)); the first stop of a street vehicle is a satellite.
+        * satellites and CDC open at -infinity (vessel times are free; synchronisation with
+          the street routes, i.e. the customer windows, bounds them).
+        """
+        customers = [node for node in self.network if node.type == "C"]
+        latest = max(node.end_interval for node in customers)
+        horizon = horizon_factor*latest
+        if vehicle_start is None:
+            first_leg = max(self.travel_matrix[self.depot.index][p.index] + self.travel_matrix[p.index][j.index]
+                            for p in self.satellites for j in customers)
+            vehicle_start = -math.ceil(first_leg)
+
+        self.depot.start_interval = vehicle_start
+        self.depot.end_interval = horizon
+        for satellite in self.satellites:
+            satellite.start_interval = -math.inf
+            satellite.end_interval = horizon
+        self.CDC.start_interval = -math.inf
+        self.CDC.end_interval = horizon
+
+        self.unbounded_vehicle_time = True
+        self.vehicle_start = vehicle_start
+        self.time_horizon = horizon
+        return
+
     def GenerateProblem(self, use_case = False):      
         
         #as in benchmark 50/150/3/3  
@@ -588,7 +625,7 @@ def read_horeca_data(file_content):
 
     return satellites
 
-def readGenerate_benchmark(instance_name, size):
+def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True):
     nodes, capacity_FEV, capacity_SEV = read_vrp_data(instance_name, size)
     problem = instance(instance_name, nodes)
     problem.depot = problem.nodes[0]
@@ -606,6 +643,8 @@ def readGenerate_benchmark(instance_name, size):
     
     problem.depot.end_interval = 1.5*problem.depot.end_interval
     problem.CDC.end_interval = 1.5*problem.CDC.end_interval
+    if unbounded_vehicle_time: #customer time windows define the timing, vehicles are free in time
+        problem.set_unbounded_vehicle_time()
     
     problem.distance_matrix = problem.DistMatrix
 
@@ -668,7 +707,7 @@ def add_TW_span(problem_instance, hours = 8):
             current.end_interval = minutess + 60*60
 
     return
-def read_generate_case(demand_set = 1, nof_horeca = 1600, nof_satellites = 10, scenario = "equal"):
+def read_generate_case(demand_set = 1, nof_horeca = 1600, nof_satellites = 10, scenario = "equal", unbounded_vehicle_time = True):
     #everything is in seconds
     horecas, satellites = read_nodes(nof_horeca, nof_satellites, scenario,(demand_set+1) ) #demand starts at 1...to... 10
     
@@ -721,6 +760,8 @@ def read_generate_case(demand_set = 1, nof_horeca = 1600, nof_satellites = 10, s
     problem.hard_tw = False
     problem.name = str(problem.name)
     problem.customers = [node for node in problem.customers if node.type == "C"]
+    if unbounded_vehicle_time: #customer time windows define the timing, vehicles are free in time
+        problem.set_unbounded_vehicle_time()
     
     #read_initial_case()
     return problem 

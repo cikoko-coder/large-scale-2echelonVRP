@@ -34,6 +34,7 @@ STAGE = "initial"
 RANDOM_SEED = 32           # same seed rule as Solve_by_decomposition: seed + its_iter
 LOG_MIP_CALLS = True       # count every Gurobi solve (model name, status) during the run
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
+UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
 
 # --- HELPER FUNCTIONS ---
 
@@ -123,10 +124,12 @@ def describe_solution(problem, solution, title):
 def build_problem(instance_name: str, reports: dict):
     """Generate the instance and set the run parameters (shared by every stage)."""
     if BENCHMARK_MODE:
-        problem = instanceGenerator.readGenerate_benchmark(instance_name, 100)
+        problem = instanceGenerator.readGenerate_benchmark(instance_name, 100,
+                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME)
     else:
         problem = instanceGenerator.read_generate_case(
-            DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES
+            DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES,
+            unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME
         )
 
     problem.case_study = not BENCHMARK_MODE
@@ -168,6 +171,11 @@ def run_initial_construction(instance_name: str, reports: dict):
          f"synchronized {problem.synch_check}")
     emit(f"vehicle use cost SE {problem.cost_vehicle_use}, FE {problem.cost_vehicle_use_FEV}, "
          f"street MIP time limit {problem.timelimit_SEmodel}s, min vessels bound {problem.minVessel_bound}")
+    customer_windows = [(node.start_interval, node.end_interval) for node in problem.customers]
+    emit(f"customer windows: earliest open {min(e for e, l in customer_windows)}, latest close {max(l for e, l in customer_windows)}")
+    emit(f"vehicle time: unbounded {problem.unbounded_vehicle_time}, garage [{problem.depot.start_interval}, {problem.depot.end_interval}], "
+         f"satellites [{problem.satellites[0].start_interval}, {problem.satellites[0].end_interval}], "
+         f"CDC [{problem.CDC.start_interval}, {problem.CDC.end_interval}]")
     emit(f"instance generation {time.time() - t_build:.2f}s")
 
     # customers that cannot be served even alone (same check as Solve.py)

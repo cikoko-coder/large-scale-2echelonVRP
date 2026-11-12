@@ -414,7 +414,7 @@ def get_makespan(problem_instance, route): #check feasibility in time, use the l
     service_sum = sum(x.unloading_time for x in route) + min_transfer*problem_instance.TransferDuration
     make = min_satellite_visit_cost + arc_cost + service_sum
 
-    minSEvs = math.ceil(make/problem_instance.nodes[0].end_interval)
+    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
     
     return minSEvs
 
@@ -427,7 +427,7 @@ def get_makespan2(problem_instance, route):
     service_sum = sum(x.unloading_time for x in route)
     make = dist_sum + service_sum
     
-    minSEvs = math.ceil(make/problem_instance.nodes[0].end_interval)
+    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
 
     return minSEvs
 
@@ -533,7 +533,7 @@ def is_route_feasible(problem_instance, route):
 
     trans_points = forward_checking(problem_instance, route) 
     
-    current_time = 0    
+    current_time = problem_instance.depot.start_interval #vehicles leave the garage as early as needed
     prev_node_index = 0
     # Calculate penalties for arriving late
     for ind, node in enumerate(route):
