@@ -163,7 +163,7 @@ def trace_route_check(problem, route):
     info = {"n": len(route), "demand": sum(node.demand for node in route)}
     info["makespan_vehicles"] = RH.get_makespan(problem, route)
     info["tabu"] = RH.is_in_tabu_list(problem, route)
-    info["heuristic_transfers"] = RH.forward_checking(problem, route)
+    info["heuristic_transfers"] = RH.refill_points(problem, route)
     info["relaxed_feasible"] = RH.is_route_feasible(problem, route)[0]
 
     rows, violation, end = replay_route_timeline(problem, route, info["heuristic_transfers"])
