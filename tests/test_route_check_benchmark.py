@@ -19,7 +19,10 @@ def problem():
     with contextlib.redirect_stdout(io.StringIO()):
         p = instanceGenerator.readGenerate_benchmark("c208.txt", 100, unbounded_vehicle_time=True)
     p.tabu_search_active = False
-    return p
+    gap = MathModels.MIP_GAP
+    MathModels.MIP_GAP = 0.0  # exact MIP plans: the DP is exact, a gap would make the costs differ
+    yield p
+    MathModels.MIP_GAP = gap
 
 
 def test_dp_equals_street_mip_on_random_subsequences(problem):
@@ -59,3 +62,24 @@ def test_route_needing_an_extra_transshipment(problem):
     assert mip_feasible and len(mip_visits) == 5
     assert bounded["transfer_cost"] == pytest.approx(mip_cost, abs=1e-3)
     assert RH.is_route_feasible(problem, route)[0]
+
+
+def test_free_routing_mip_routes_are_dp_feasible(problem):
+    """street_routing_MIP on 10 customers: its routes pass the DP with the same cost; a
+    warm start from those routes is accepted; the fixed-route entry refuses no route."""
+    customers = sorted(problem.customers, key=lambda node: node.index)[:10]
+    res = MathModels.street_routing_MIP(problem, 60, customers=customers)
+    assert res["feasible"] and res["gap"] <= 1e-4
+    assert sorted(node.index for route in res["routes"] for node in route) == [c.index for c in customers]
+    total = 0.0
+    for route in res["routes"]:
+        dp = RH.optimal_transshipment_checking(problem, route)
+        assert dp["feasible"]
+        total += dp["cost"]
+    assert total == pytest.approx(res["objective"], abs=1e-3)
+    assert res["objective"] == pytest.approx(res["fixed_vehicle_cost"] + res["distance_travel_cost"]
+                                             + res["lead_time_cost"] + res["transshipment_cost"], abs=1e-3)
+    warm = MathModels.street_routing_MIP(problem, 60, customers=customers, warm_start=res["routes"])
+    assert warm["feasible"] and warm["objective"] <= res["objective"] + 1e-3
+    with pytest.raises(ValueError):
+        MathModels.street_problem_MIP(problem, 10)

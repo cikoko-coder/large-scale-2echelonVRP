@@ -39,6 +39,13 @@ ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or 
 REFILL_RULE = "optimal_cost"  # route check rule: "optimal_cost" (bounded DP) or "optimal" (exactly the minimum)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
 REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
+# initial solution: "heuristic" (multi-start insertion), "mip" (free street routing MIP over all
+# customers, MathModels.street_routing_MIP) or "heuristic+mip" (the MIP warm-started with the
+# best heuristic routes). The MIP needs a full Gurobi license for 100 customers (the pip
+# size-limited license stops at 2000 variables).
+INITIAL_METHOD = "heuristic"
+MIP_INITIAL_TIMELIMIT = 600   # seconds for the free routing MIP
+MIP_INITIAL_CUSTOMERS = None  # None: all customers; an int n restricts the instance to the first n customers (testing)
 
 # --- HELPER FUNCTIONS ---
 
@@ -353,17 +360,48 @@ def run_initial_construction(instance_name: str, reports: dict):
     random.seed(RANDOM_SEED + problem.its_iter)
     problem.customers = [node for node in problem.nodes if node.index > 0]
 
-    # --- step 1: multi-start construction + street MIPs --------------------
+    if MIP_INITIAL_CUSTOMERS is not None:
+        problem.customers = sorted(problem.customers, key=lambda node: node.index)[:MIP_INITIAL_CUSTOMERS]
+        emit(f"TESTING: instance restricted to the first {len(problem.customers)} customers")
+
+    # --- step 1: initial solution(s) --------------------------------------
     n_mip = len(mip_log) if mip_log is not None else 0
     t1 = time.time()
-    construction = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
-    t_construction = time.time() - t1
-    emit("")
-    emit(f"--- step 1: multi-start construction ({START_CONS} starts) + transshipment check per route ({RH.ROUTE_CHECK}): {t_construction:.2f}s")
-    for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
-        emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'} multi-trip solution, "
-             f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}")
-    emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
+    construction = None
+    if INITIAL_METHOD in ("heuristic", "heuristic+mip"):
+        construction = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
+        t_construction = time.time() - t1
+        emit("")
+        emit(f"--- step 1: multi-start construction ({START_CONS} starts) + transshipment check per route ({RH.ROUTE_CHECK}): {t_construction:.2f}s")
+        for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
+            emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'} multi-trip solution, "
+                 f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}")
+        emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
+    if INITIAL_METHOD in ("mip", "heuristic+mip"):
+        warm = None
+        if construction is not None and construction.is_feasible:
+            warm = [route.sequence for route in construction.routes_sevs]
+        t1 = time.time()
+        try:
+            mip_solution, mip_result = MLD.mip_initial_solution(problem, MIP_INITIAL_TIMELIMIT, warm_start=warm,
+                                                                customers=problem.customers)
+        except Exception as error:  # e.g. the size-limited license
+            mip_solution, mip_result = None, {"feasible": False, "status": f"error: {error}", "n_vars": "?", "n_constrs": "?",
+                                              "time": time.time() - t1, "objective": math.inf, "gap": math.inf}
+        emit("")
+        emit(f"--- step 1{'b' if construction is not None else ''}: free street routing MIP over {len(problem.customers)} customers"
+             f"{' warm-started with the heuristic routes' if warm else ''}, time limit {MIP_INITIAL_TIMELIMIT}s: {mip_result['time']:.1f}s")
+        emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {GUROBI_STATUS.get(mip_result['status'], mip_result['status'])}, "
+             f"objective {round(mip_result['objective'], 1) if mip_result['feasible'] else '-'}, gap {round(mip_result['gap'], 4) if mip_result['feasible'] else '-'}")
+        if mip_result["feasible"]:
+            emit(f"  objective parts: vehicles {mip_result['fixed_vehicle_cost']}, distance {round(mip_result['distance_travel_cost'], 1)}, "
+                 f"detours {round(mip_result['lead_time_cost'], 1)}, transshipments {mip_result['transshipment_cost']} ({len(mip_result['visits'])})")
+            emit(describe_solution(problem, mip_solution, "MIP multi-trip solution (street level, transshipments re-placed by the DP)"))
+            if construction is None or not construction.is_feasible or (
+                    mip_solution.is_feasible and mip_solution.objective < construction.objective):
+                construction = mip_solution
+        else:
+            emit("  no MIP solution")
     if mip_log is not None:
         emit(summarize_mip_calls(mip_log, n_mip))
     emit(f"complete route sets stored for the two-echelon check: {len(problem.heuristics_solutions)}")

@@ -669,6 +669,26 @@ def multi_start_initial(problem_instance, nstart = 5, report_initials = False, l
         return feasible[0]
     return checked[0]
 
+def mip_initial_solution(problem_instance, timelimit, warm_start = None, customers = None, output = False):
+    """
+    Initial solution by the free street routing MIP (MathModels.street_routing_MIP): the model
+    routes the customers, places the transshipments and chooses the satellites in one go,
+    objective = vehicles + distance + detours + transshipments (optimal for the street problem
+    at gap 0; with a time limit the incumbent). warm_start = routes of a heuristic solution.
+    The routes are stored in problem_instance.heuristics_solutions (complete solutions only)
+    and checked as a multi-trip solution (check_MVRP_solution, transshipments by the DP).
+    :return: (multi-trip solution object or None, MIP result dict)
+    """
+    result = MathModels.street_routing_MIP(problem_instance, timelimit, customers = customers,
+                                           warm_start = warm_start, output = output)
+    if not result["feasible"]:
+        return None, result
+    routes = result["routes"]
+    RH.add_to_feasible_solution(problem_instance, routes)
+    solution = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
+    solution.mip_result = result
+    return solution, result
+
 def get_initial_solution(problem_instance, nof_initializations = 1, read_initials = False):    
 
       

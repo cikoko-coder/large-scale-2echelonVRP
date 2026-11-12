@@ -118,6 +118,36 @@ search / ALNS instead of only `best_found`, raise `START_CONS`, and diversify th
 two starts differ by 0.1 % in cost because `select_seed_customers` takes the customers closest
 to a garage-satellite loop).
 
+## 4b. Initial solutions by the street MIP itself (free routing)
+
+The model builders already support free routing (no `solution_in` fixes the arcs); only the
+entry point was broken. `MathModels.street_routing_MIP(problem, timelimit, customers=None,
+warm_start=None)` now builds the model over all (or the given) customers: the MIP chooses the
+routes, the transshipment points and their satellites in one go, objective = vehicles +
+distance + detours + 10000 per transshipment. `Multi_level_destroy.mip_initial_solution`
+stores its routes and turns them into a multi-trip solution (DP transshipments);
+`MultiEchelonPipeline.INITIAL_METHOD = "mip"` or `"heuristic+mip"` (MIP warm-started with the
+best heuristic routes, `MIP_INITIAL_TIMELIMIT`) runs it in step 1.
+
+Revisions of the model for the free case: arc membership by set and incoming/outgoing lists
+(the builders were O(n^2 * |arcs|) with list lookups), one lead-time constraint per arc
+instead of one per arc and satellite (equivalent, 8 times fewer rows), `MIP_GAP` of the
+fixed-route model configurable, `street_problem_MIP` raises a clear error instead of crashing
+on `single=None`.
+
+Verification in this sandbox (pip Gurobi, size-limited to 2000 variables, so at most about
+25 customers): on 10, 15 and 20 customers of c208 the MIP routes pass the DP with exactly the
+MIP objective, the warm start is accepted, and the pipeline runs through to the water MIP
+(`MIP_INITIAL_CUSTOMERS = 15`). 10 customers solve to optimality in 0.1 s, 15 in 4 s, 20 stop
+at the time limit with a 50 % gap (the bound is weak: 10000 per vehicle and per transshipment
+dominates the LP relaxation). The 100-customer run needs the full license; expect incumbents
+from Gurobi's heuristics rather than proven optima, so the heuristic warm start matters.
+
+Note on the objective: the free MIP optimizes the full street cost including the route
+distance, while the heuristic MVRP objective (`check_MVRP_solution`) counts only
+transshipments and detours; the pipeline compares both after `check_MVRP_solution`, so the
+distance still does not enter the choice (see the open item below).
+
 ## 5. Still open
 
 * `run_instance` calls `MLD.Solve_by_iterative`, which does not exist (use `Solve_by_decomposition`).
