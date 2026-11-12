@@ -168,7 +168,9 @@ def trace_route_check(problem, route):
 
     rows, violation, end = replay_route_timeline(problem, route, info["heuristic_transfers"])
     info["rows"], info["violation"], info["end"] = rows, violation, end
-    if info["makespan_vehicles"] > 1:
+    if RH.REFILL_RULE == "optimal" and not info["relaxed_feasible"] and info["makespan_vehicles"] <= 1 and not info["tabu"]:
+        info["reason"] = "no refill plan is within capacity and on time (bothway optimal DP)"
+    elif info["makespan_vehicles"] > 1:
         info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
     elif info["tabu"]:
         info["reason"] = "route contains a tabu sequence"
