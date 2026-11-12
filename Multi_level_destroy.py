@@ -618,6 +618,9 @@ def select_seed_customers(problem_instance, nstart = 5):
 
     return seed_customer_list
 
+#multi_start_initial: repair + store every constructed start (True) or only the best one (False)
+REPAIR_ALL_STARTS = False
+
 def multi_start_initial(problem_instance, nstart = 5, report_initials = False, last_route = []):
         
     start_time = time.time()
@@ -651,10 +654,40 @@ def multi_start_initial(problem_instance, nstart = 5, report_initials = False, l
     if report_initials:
         report_initial_solutions_stats(problem_instance, initial_solutions, runtime_all)
     
-    
-    solution_best_constructed =  RH.check_feasibility(problem_instance, initial_solutions[0][3],VRP_only = False, multi_trip=True, single_route_MVRP = False)
+    #multi-trip (MVRP) check with repair of the infeasible routes: the best constructed route set
+    #only, or every start (REPAIR_ALL_STARTS): each repaired set is stored in
+    #problem_instance.heuristics_solutions, so check_found_solutions evaluates all of them at the
+    #two-echelon level and the best FE objective wins, not the best street objective
+    checked = []
+    for start, n_routes, cost, routes in (initial_solutions if REPAIR_ALL_STARTS else initial_solutions[:1]):
+        solution_mvrp = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip=True, single_route_MVRP = False)
+        checked.append(solution_mvrp)
+    problem_instance.constructed_solutions = checked
+    feasible = [s for s in checked if s.is_feasible]
+    if feasible:
+        feasible.sort(key=lambda s: (s.nSEVs, s.objective))
+        return feasible[0]
+    return checked[0]
 
-    return solution_best_constructed #, initial_solutions
+def mip_initial_solution(problem_instance, timelimit, warm_start = None, customers = None, output = False):
+    """
+    Initial solution by the free street routing MIP (MathModels.street_routing_MIP): the model
+    routes the customers, places the transshipments and chooses the satellites in one go,
+    objective = vehicles + distance + detours + transshipments (optimal for the street problem
+    at gap 0; with a time limit the incumbent). warm_start = routes of a heuristic solution.
+    The routes are stored in problem_instance.heuristics_solutions (complete solutions only)
+    and checked as a multi-trip solution (check_MVRP_solution, transshipments by the DP).
+    :return: (multi-trip solution object or None, MIP result dict)
+    """
+    result = MathModels.street_routing_MIP(problem_instance, timelimit, customers = customers,
+                                           warm_start = warm_start, output = output)
+    if not result["feasible"]:
+        return None, result
+    routes = result["routes"]
+    RH.add_to_feasible_solution(problem_instance, routes)
+    solution = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
+    solution.mip_result = result
+    return solution, result
 
 def get_initial_solution(problem_instance, nof_initializations = 1, read_initials = False):    
 

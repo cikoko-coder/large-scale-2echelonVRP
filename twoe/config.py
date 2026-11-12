@@ -10,12 +10,12 @@ from typing import List, Optional
 @dataclass
 class CostConfig:
     # SE (street) – paper notation beta^SE, c^SE, c^S
-    beta_SE: Optional[float] = None  # None -> shift length of the instance (paper: "vehicle use cost = shift duration")
+    beta_SE: Optional[float] = None  # None -> beta(c^s, c^w) of the paper, eq. (62), see resolve_costs
     c_SE: float = 1.0
     c_S: float = 0.0  # benchmark instances have no satellite handling cost
     # FE (water) – beta^FE, c^FE
-    beta_FE: Optional[float] = None
-    c_FE: float = 1.0
+    beta_FE: Optional[float] = None  # None -> alpha * beta (water level significance alpha = WLS)
+    c_FE: Optional[float] = None  # None -> alpha * c_SE
 
 
 @dataclass
@@ -69,14 +69,28 @@ class RunConfig:
             json.dump(self.to_dict(), f, indent=2)
 
 
-def resolve_costs(problem, cost: CostConfig) -> dict:
-    """Fill the None defaults from the instance (shift length as vehicle-use cost)."""
-    shift_SE = float(problem.depot.end_interval - problem.depot.start_interval)
-    shift_FE = float(problem.CDC.end_interval - problem.CDC.start_interval)
+def fixed_vehicle_cost(problem, c_SE: float = 1.0, c_FE: float = 1.0) -> float:
+    """beta(c^s, c^w) of the paper (eq. 62): the most expensive way to serve one customer with
+    one LEFV and one vessel, max over customers i and satellites p of
+    c^s (t_gi + t_ip + t_pg) + c^w (t_dp + t_pd). It is at least the cost of serving the
+    customer in an existing route, so the fixed costs make the model prefer fewer vehicles."""
+    t = problem.travel_matrix
+    g, d = problem.depot.index, problem.CDC.index
+    return max(c_SE*(t[g][i.index] + t[i.index][p.index] + t[p.index][g]) + c_FE*(t[d][p.index] + t[p.index][d])
+               for i in problem.customers for p in problem.satellites)
+
+
+def resolve_costs(problem, cost: CostConfig, wls: float = 1.0) -> dict:
+    """Fill the None defaults as in the paper (Section 5.1): with the water level significance
+    alpha = wls, [c^s, c^w, beta^s, beta^w] = [c_SE, alpha * c_SE, beta, alpha * beta] where
+    beta = fixed_vehicle_cost(c^s, c^w) (eq. 62). Explicit values in `cost` are kept."""
+    c_SE = float(cost.c_SE)
+    c_FE = float(cost.c_FE) if cost.c_FE is not None else wls*c_SE
+    beta = fixed_vehicle_cost(problem, c_SE, c_FE)
     return {
-        "beta_SE": shift_SE if cost.beta_SE is None else float(cost.beta_SE),
-        "c_SE": float(cost.c_SE),
+        "beta_SE": beta if cost.beta_SE is None else float(cost.beta_SE),
+        "c_SE": c_SE,
         "c_S": float(cost.c_S),
-        "beta_FE": shift_FE if cost.beta_FE is None else float(cost.beta_FE),
-        "c_FE": float(cost.c_FE),
+        "beta_FE": wls*beta if cost.beta_FE is None else float(cost.beta_FE),
+        "c_FE": c_FE,
     }
