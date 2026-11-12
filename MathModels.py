@@ -216,23 +216,33 @@ def add_temporal_constraints(problem, model):
     lead_time = {} #delay at customer j (loading and charging considered together)
     
 
+    #detour of visiting satellite p between i and j (the lead time of j when it is a transfer point)
+    def detour(i, p, j):
+        return problem.travel_matrix[i][p.index] + problem.travel_matrix[p.index][j] - problem.travel_matrix[i][j]
+
     for i in Customers:
         h[i] = model.addVar(lb=problem.nodes[i].start_interval,ub=problem.nodes[i].end_interval, vtype=GRB.CONTINUOUS, name="h"+str(i))
-        #add lead times
-        lead_time[i] = model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS, name="lead_time"+str(i))
+        #add lead times, bounded by the largest detour over the arcs entering i
+        max_lead = max([detour(k, p, i) for [k,l] in arcList if l == i for p in problem.satellites] + [0])
+        lead_time[i] = model.addVar(lb=0,ub=max_lead, vtype=GRB.CONTINUOUS, name="lead_time"+str(i))
 
+    #garage departure: free in time between the vehicle start and the horizon end
     h[0] = model.addVar(lb=problem.nodes[0].start_interval,ub=problem.nodes[0].end_interval, vtype=GRB.CONTINUOUS, name="h"+str(0))    
     model.update()
     #service start times flowing #Const8
-    bigNumberTime = max(problem.nodes[k].end_interval + problem.nodes[k].unloading_time + problem.travel_matrix[k][0] for k in Customers)                   
+    #big-M of arc (i,j) from the variable bounds: the constraint must be slack when x_ij = 0
+    #M_ij = ub(h_i) + s_i + t_ij + transfer + ub(lead_j) - lb(h_j)  (customer windows, not the vehicle shift)
+    vehicle_start = problem.nodes[0].start_interval
                 
     for j in Customers:
-        model.addConstr(h[j] >= problem.travel_matrix[0][j] ) 
+        model.addConstr(h[j] >= vehicle_start + problem.travel_matrix[0][j] ) 
         for [i,k] in arcList:    
             if k != j :
                 continue 
             for p in problem.satellites:
-                model.addConstr(lead_time[j] >= (xij[i,j] + v[j,p.index] - 1)*(problem.travel_matrix[i][p.index] + problem.travel_matrix[p.index][j] - problem.travel_matrix[i][j])) 
+                model.addConstr(lead_time[j] >= (xij[i,j] + v[j,p.index] - 1)*detour(i, p, j)) 
+            bigNumberTime = max(0, h[i].ub + problem.nodes[i].unloading_time + problem.travel_matrix[i][j]
+                                + problem.TransferDuration + lead_time[j].ub - h[j].lb)
                     
             model.addConstr(h[i] + problem.nodes[i].unloading_time  + problem.travel_matrix[i][j] #service ends
                             + problem.TransferDuration*quicksum(v[j,p.index] for p in problem.satellites) + lead_time[j]  <= h[j] + bigNumberTime*(1 - xij[i,j])) #transfer ends

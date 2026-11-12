@@ -202,13 +202,30 @@ def add_temporal_constraints(problem, model, tasks):
     u = {} #service start at wp   
     
 
+    #bounds of the transfer times u (vessel times are free; the customer windows bound them)
+    #synchronized: u_j >= h_prev + s_prev + t(prev, p)  and  u_j + transfer + t(p, j) <= h_j,
+    #              so  e_prev + s_prev + t(prev, p) <= u_j <= l_j - transfer - t(p, j)
+    #asynchronous: no link with the street routes, u lies in the vehicle horizon
+    predecessor = {}
+    for r in getattr(model, "_route_given", None) or []:
+        for [a,b] in MathModels.generate_arcs(r):
+            predecessor[b] = a
+    horizon = problem.CDC.end_interval
     for taski in tasks:
         i = taski.transfer_point
-        u[i] = model.addVar(lb=-math.inf,ub=math.inf, vtype=GRB.CONTINUOUS, name="u"+str(i))
+        p = taski.index
+        if problem.synch_check and i in predecessor:
+            prev = predecessor[i]
+            lb_u = problem.nodes[prev].start_interval + problem.nodes[prev].unloading_time + problem.travel_matrix[prev][p]
+            ub_u = problem.nodes[i].end_interval - problem.TransferDuration - problem.travel_matrix[p][i]
+        else:
+            lb_u = problem.CDC.start_interval if problem.CDC.start_interval > -math.inf else -horizon
+            ub_u = horizon
+        u[i] = model.addVar(lb=lb_u,ub=ub_u, vtype=GRB.CONTINUOUS, name="u"+str(i))
         
     model.update()
     #service start times flowing #Const8
-    bigNumberTime = problem.CDC.end_interval                   
+    #big-M of arc (i,j) from the bounds of u: M_ij = ub(u_i) + s_i + t_ij + transfer - lb(u_j)
                 
     for taski in tasks:
         i = taski.index
@@ -218,6 +235,8 @@ def add_temporal_constraints(problem, model, tasks):
             j = taskj.index
             transfer_j = taskj.transfer_point
             if [transfer_i,transfer_j] in arcList:                    
+                bigNumberTime = max(0, u[transfer_i].ub + problem.network[i].unloading_time + problem.travel_matrix[i][j]
+                                    + problem.TransferDuration - u[transfer_j].lb)
                 model.addConstr(u[transfer_i] + problem.network[i].unloading_time  + problem.travel_matrix[i][j]*xij[transfer_i,transfer_j] #service ends
                                 + problem.TransferDuration  <= u[transfer_j] + bigNumberTime*(1 - xij[transfer_i,transfer_j])) #transfer ends
 

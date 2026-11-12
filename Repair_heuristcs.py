@@ -13,47 +13,11 @@ import os
 BigNumber = 1000000
 def bothway_checking(problem_instance, route):
     """
-    Finds node indices where a refill is required.
-    :param demands: List of loads for each node (e.g., [2, 5, 8, 3])
-    :param capacity: Maximum vehicle capacity Q
-    :return: List of indices where the vehicle takes a break to refill
+    Refill points of the greedy trip split in both directions.
+    :return: (forward, backward), each a list of refill node indices in route order
+             (route[0] first, it is always a refill)
     """
-    demands = [node.demand for node in route]
-    capacity = problem_instance.capacity_SEV
-    
-    
-    total_demand = sum(demands)
-    min_refills = math.ceil(total_demand / capacity)    
-
-    list_ind = [node.index for node in route]
-    first_node = route[0].index
-
-    if min_refills > 1:
-        for check in range(2):
-            if check == 0:
-                refill_indices = []
-                forward = refill_indices
-            else:
-                demands.reverse()
-                list_ind.reverse()
-                refill_indices = []
-                backward = refill_indices
-            current_load =  0    
-            for i, demand in enumerate(demands):            
-                # If adding this node exceeds current capacity, refill first
-                if current_load + demand > capacity:
-                    refill_indices.append(list_ind[i])
-                    # After refilling, the load is just the current node's demand
-                    current_load = demand
-                else:
-                    # Continue adding to the current "bin"
-                    current_load += demand
-            if first_node not in refill_indices:
-                refill_indices.insert(0, first_node) #first node is always a refill  
-    else:
-        forward, backward = [route[0].index], [route[0].index] #first node is always a refill and the only one if needed
-
-    return forward, backward
+    return forward_checking(problem_instance, route), backward_checking(problem_instance, route)
 
 def forward_checking(problem_instance, route):
     """
@@ -90,30 +54,214 @@ def forward_checking(problem_instance, route):
     return refill_indices
 
 def backward_checking(problem_instance, route):
-    demands = [node.demand for node in route]
+    """
+    Refill points from a greedy split that starts at the END of the route.
+
+    Scanning backwards, a node whose demand would overflow the current trip closes that
+    trip: it is the LAST node of the chronologically earlier trip, so the refill happens
+    just before its successor. Every trip is filled from its end, so the refills come as
+    early as possible (forward_checking places them as late as possible); both give the
+    minimum number of trips.
+    :return: refill node indices in route order (route[0] first, it is always a refill)
+    """
+    if not route:
+        return []
     capacity = problem_instance.capacity_SEV
-    # Reverse the list to process backward
-    rev_demands = demands[::-1]
-    n = len(demands)
-    
-    refill_indices_rev = []
+    cut_positions = [] #positions where a new trip starts
     current_load = 0
-    
-    for i, demand in enumerate(rev_demands):
-        
+    for pos in range(len(route) - 1, -1, -1):
+        demand = route[pos].demand
         if current_load + demand > capacity:
-            # This node triggers a 'refill' in the backward flow
-            # The actual node index in the original list is (n - 1 - i)
-            refill_indices_rev.append(route[n - 1 - i].index)
+            cut_positions.append(pos + 1) #refill before the successor
             current_load = demand
         else:
             current_load += demand
-            
-    # Reverse the results to keep them in chronological order (0 -> N)
-    refill_indices_rev.reverse()
-    if route[0].index not in refill_indices_rev:
-        refill_indices_rev.insert(0, route[0].index) #first node is always a refill
-    return refill_indices_rev
+    cut_positions.sort()
+    return [route[0].index] + [route[pos].index for pos in cut_positions]
+
+#refill rule used by the relaxed route check (is_route_feasible):
+#  "optimal"      -> bothway_optimal_checking: minimum number of transshipments, best refill
+#                    points between the backward and forward bounds (DP)
+#  "optimal_cost" -> optimal_transshipment_checking: adds transshipments until the travel cost
+#                    is optimal (same solution as the street MIP)
+#  "backward" / "forward" -> fixed greedy refill points
+REFILL_RULE = "optimal"
+
+def refill_points(problem_instance, route):
+    """Refill (transfer) points assumed by the relaxed route check, see REFILL_RULE."""
+    if REFILL_RULE == "forward":
+        return forward_checking(problem_instance, route)
+    if REFILL_RULE == "optimal":
+        return bothway_optimal_checking(problem_instance, route)["refills"]
+    if REFILL_RULE == "optimal_cost":
+        return optimal_transshipment_checking(problem_instance, route)["refills"]
+    return backward_checking(problem_instance, route)
+
+def refill_windows(problem_instance, route, n_trips, forward = None, backward = None):
+    """
+    Position windows [lo_k, hi_k] of the start of trip k (k = 0..n_trips-1) of a route
+    split into n_trips trips; position 0 always starts trip 0.
+
+    hi_k: the first k trips must cover positions 0..c_k-1; the forward greedy covers the
+          most with k trips, so c_k <= forward[k] (k < minimum number of trips).
+    lo_k: the last n_trips-k trips must cover positions c_k..n-1; the backward greedy
+          covers the most with j trips, so c_k >= backward[m-j] (j = n_trips-k <= m).
+    With the minimum number of trips m this is backward[k] <= c_k <= forward[k].
+    Every trip has at least one customer: k <= c_k <= n - (n_trips - k).
+    """
+    n = len(route)
+    where = {node.index: pos for pos, node in enumerate(route)}
+    forward = forward if forward is not None else [where[i] for i in forward_checking(problem_instance, route)]
+    backward = backward if backward is not None else [where[i] for i in backward_checking(problem_instance, route)]
+    m = len(forward)
+    lo, hi = [], []
+    for k in range(n_trips):
+        remaining = n_trips - k
+        lo_k = backward[m - remaining] if remaining <= m else 0
+        hi_k = forward[k] if k < m else n - 1
+        lo.append(max(lo_k, k))
+        hi.append(min(hi_k, n - remaining))
+    lo[0] = hi[0] = 0
+    return lo, hi
+
+def bothway_optimal_checking(problem_instance, route):
+    """
+    Route feasibility with the MINIMUM number of transshipments m = number of trips of the
+    greedy split: the k-th refill lies between the backward (earliest) and forward (latest)
+    greedy positions, backward[k] <= c_k <= forward[k], and the DP picks the best refill
+    points inside these windows (cheapest detours, on time, within capacity).
+    A route that needs more than m transshipments to be on time is rejected here; see
+    optimal_transshipment_checking for the cost-optimal number of transshipments.
+    :return: same dict as optimal_transshipment_checking
+    """
+    return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
+
+def optimal_transshipment_checking(problem_instance, route, extra_trips = None):
+    """
+    Optimal refill (transfer) points of a fixed street route: dynamic programming in the
+    windows between the backward (earliest) and forward (latest) greedy refill positions.
+
+    Same rules as the street MIP (MathModels.street_problem_MIP) for a single route:
+    * a refill before customer j goes through the satellite with the smallest detour
+      t(i,p) + t(p,j) - t(i,j) (fastest and cheapest), plus the transfer duration;
+      the first customer is always a refill;
+    * the vehicle leaves the garage at the vehicle start, waits for a window opening and
+      fails when it arrives after the window end;
+    * trip loads <= SEV capacity;
+    * cost = vehicle use + travel cost of the route + travel cost of the detours
+             + trip_unit_cost per refill   (the MIP objective for one route).
+    The number of trips K starts at the minimum m and grows (more refills can be needed to
+    use satellites that are on the way) until the cost lower bound of K trips exceeds the
+    best cost found; extra_trips limits K to m + extra_trips (0: minimum transshipments only,
+    None: no limit, the street MIP's optimum). Labels: per (trips started, start of the current trip) the Pareto set
+    of (finish time, cost); only refill positions inside the windows are expanded.
+
+    :return: dict with feasible, refills (customer indices), satellites ({customer: satellite}),
+             cost (full route cost), transfer_cost (detours + refills, the cost street_problem_MIP
+             returns), n_trips, finish (end of the last service), labels (DP work)
+    """
+    result = {"feasible": False, "refills": [], "satellites": {}, "cost": BigNumber, "transfer_cost": BigNumber,
+              "n_trips": 0, "finish": None, "labels": 0}
+    n = len(route)
+    if n == 0:
+        result.update(feasible=True, cost=0, transfer_cost=0)
+        return result
+    capacity = problem_instance.capacity_SEV
+    if any(node.demand > capacity for node in route):
+        return result
+    t = problem_instance.travel_matrix
+    satellites = problem_instance.satellites
+    unit = problem_instance.cost_unit_travel
+    transfer = problem_instance.TransferDuration
+
+    prefix = [0]
+    for node in route:
+        prefix.append(prefix[-1] + node.demand)
+    previous = [0] + [node.index for node in route[:-1]]
+    #closest satellite of every refill position: (detour, satellite)
+    refill_detour = []
+    for pos, node in enumerate(route):
+        i = previous[pos]
+        detour, satellite = min((t[i][p.index] + t[p.index][node.index] - t[i][node.index], p.index) for p in satellites)
+        refill_detour.append((max(0.0, detour), satellite)) #lead time >= 0 in the MIP (rounding can give -0.1)
+    #time relaxation: every refill adds a detour >= 0, so the fastest schedule refills only before
+    #the first customer (capacity ignored); if it misses a window, no refill plan is on time
+    finish = problem_instance.depot.start_interval + refill_detour[0][0] + transfer
+    for pos, node in enumerate(route):
+        arrival = finish + t[previous[pos]][node.index]
+        if arrival > node.end_interval:
+            return result
+        finish = max(arrival, node.start_interval) + node.unloading_time
+    fixed_cost = problem_instance.cost_vehicle_use + unit*(
+        sum(t[previous[pos]][node.index] for pos, node in enumerate(route)) + t[route[-1].index][0])
+
+    where = {node.index: pos for pos, node in enumerate(route)}
+    forward = [where[i] for i in forward_checking(problem_instance, route)]
+    backward = [where[i] for i in backward_checking(problem_instance, route)]
+    m = len(forward)
+    max_trips = n if extra_trips is None else min(n, m + extra_trips)
+
+    def add_label(labels, key, label):
+        front = labels.setdefault(key, [])
+        for other in front:
+            if other[0] <= label[0] + 1e-9 and other[1] <= label[1] + 1e-9:
+                return #dominated
+        front[:] = [o for o in front if not (label[0] <= o[0] + 1e-9 and label[1] <= o[1] + 1e-9)]
+        front.append(label)
+
+    best = None
+    for n_trips in range(m, max_trips + 1):
+        if best is not None and fixed_cost + n_trips*problem_instance.trip_unit_cost >= best[1] - 1e-9:
+            break #more refills cannot be cheaper
+        lo, hi = refill_windows(problem_instance, route, n_trips, forward, backward)
+        if any(lo[k] > hi[k] for k in range(n_trips)):
+            continue
+        #labels: (trips started, start position of current trip) -> [(finish time, cost, refill positions)]
+        labels = {}
+        node = route[0]
+        detour, _ = refill_detour[0]
+        arrival = problem_instance.depot.start_interval + t[0][node.index] + detour + transfer
+        if arrival <= node.end_interval:
+            add_label(labels, (1, 0), (max(arrival, node.start_interval) + node.unloading_time, unit*detour, (0,)))
+        for pos in range(1, n):
+            if not labels:
+                break
+            node = route[pos]
+            drive = t[previous[pos]][node.index]
+            new_labels = {}
+            for (started, start), front in labels.items():
+                for finish, cost, refills in front:
+                    #continue the current trip
+                    must_cut_before = started < n_trips and pos > hi[started]
+                    if not must_cut_before and prefix[pos + 1] - prefix[start] <= capacity:
+                        arrival = finish + drive
+                        if arrival <= node.end_interval:
+                            add_label(new_labels, (started, start),
+                                      (max(arrival, node.start_interval) + node.unloading_time, cost, refills))
+                    #refill before this customer: start trip number `started`
+                    if started < n_trips and lo[started] <= pos <= hi[started]:
+                        detour, _ = refill_detour[pos]
+                        arrival = finish + drive + detour + transfer
+                        if arrival <= node.end_interval:
+                            add_label(new_labels, (started + 1, pos),
+                                      (max(arrival, node.start_interval) + node.unloading_time,
+                                       cost + unit*detour, refills + (pos,)))
+            result["labels"] += sum(len(front) for front in new_labels.values())
+            labels = new_labels
+        complete = [label for (started, start), front in labels.items() if started == n_trips for label in front]
+        if complete:
+            finish, cost, refills = min(complete, key=lambda x: (x[1], x[0]))
+            total = fixed_cost + cost + n_trips*problem_instance.trip_unit_cost
+            if best is None or total < best[1] - 1e-9:
+                best = (n_trips, total, finish, refills)
+
+    if best is not None:
+        n_trips, total, finish, refills = best
+        result.update(feasible=True, n_trips=n_trips, cost=total, finish=finish,
+                      transfer_cost=total - fixed_cost, #detours + refills: what street_problem_MIP returns as cost
+                      refills=[route[pos].index for pos in refills],
+                      satellites={route[pos].index: refill_detour[pos][1] for pos in refills})
+    return result
 
 def mip_checking(problem_instance, route):
 
@@ -414,7 +562,7 @@ def get_makespan(problem_instance, route): #check feasibility in time, use the l
     service_sum = sum(x.unloading_time for x in route) + min_transfer*problem_instance.TransferDuration
     make = min_satellite_visit_cost + arc_cost + service_sum
 
-    minSEvs = math.ceil(make/problem_instance.nodes[0].end_interval)
+    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
     
     return minSEvs
 
@@ -427,7 +575,7 @@ def get_makespan2(problem_instance, route):
     service_sum = sum(x.unloading_time for x in route)
     make = dist_sum + service_sum
     
-    minSEvs = math.ceil(make/problem_instance.nodes[0].end_interval)
+    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
 
     return minSEvs
 
@@ -531,12 +679,23 @@ def is_route_feasible(problem_instance, route):
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[route[-1].index][0] 
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[0][route[0].index] #return to depot and departure from depot
 
-    trans_points = forward_checking(problem_instance, route) 
-    
-    current_time = 0    
+    if REFILL_RULE in ("optimal", "optimal_cost"):
+        #refill points chosen by the DP: minimum transshipments ("optimal") or cost optimal ("optimal_cost")
+        optimal = (bothway_optimal_checking(problem_instance, route) if REFILL_RULE == "optimal"
+                   else optimal_transshipment_checking(problem_instance, route))
+        if not optimal["feasible"]:
+            return False, route, BigNumber
+        trans_points = []
+        current_time = optimal["finish"]
+        route_to_replay = []
+    else:
+        trans_points = refill_points(problem_instance, route)
+        current_time = problem_instance.depot.start_interval #vehicles leave the garage as early as needed
+        route_to_replay = route
+
     prev_node_index = 0
     # Calculate penalties for arriving late
-    for ind, node in enumerate(route):
+    for ind, node in enumerate(route_to_replay):
         #first node is always a transfer point, so add transfer time if it's the first node
         current_time += problem_instance.closest_satellite_network.distance_matrix[prev_node_index][node.index]            
         if node.index in trans_points: #transfer point
