@@ -462,9 +462,9 @@ def local_search_initial(problem_instance, solution, seed = None, max_rounds = 2
         return solution, report
     return improved, report
 
-def alns_initial(problem_instance, solution, seed = None, iterations = None, time_limit = None, log = None):
+def alns_improve(problem_instance, solution, seed = None, iterations = None, time_limit = None, log = None):
     """
-    Improve an initial multi-trip solution by the ALNS of alns.py (destroy / repair on the SEV
+    Improve a multi-trip solution by the ALNS of alns.py (destroy / repair on the SEV
     routes, two-way check, simulated annealing, relocate + 2-opt* on every new best). The
     ALNS.ALNS_ELITE best route sets are stored for the two-echelon check; the best is checked again
     as a multi-trip solution (transshipments by the DP), with its two-way cost set.
@@ -550,33 +550,6 @@ def multi_start_initial(problem_instance, nstart = 5, report_initials = False, l
         return feasible[0]
     return checked[0]
 
-def mip_initial_solution(problem_instance, timelimit, warm_start = None, customers = None, output = False):
-    """
-    Initial solution by the free street routing MIP (MathModels.street_routing_MIP): the model
-    routes the customers, places the transshipments and chooses the satellites in one go,
-    objective = vehicles + distance + detours + transshipments (optimal for the street problem
-    at gap 0; with a time limit the incumbent). warm_start = routes of a heuristic solution;
-    None (the free initializer) passes no routes, the MIP starts from scratch.
-    The routes are stored in problem_instance.heuristics_solutions (complete solutions only)
-    and checked as a multi-trip solution (check_MVRP_solution, transshipments by the DP).
-    The cost of the solution is decided by the two-way check (RH.two_way_solution_cost of the
-    MVRP routes), not by the MIP objective: result["two_way"] and solution.two_way_cost.
-    :return: (multi-trip solution object or None, MIP result dict)
-    """
-    result = MathModels.street_routing_MIP(problem_instance, timelimit, customers = customers,
-                                           warm_start = warm_start, output = output)
-    result["warm_started"] = bool(warm_start)
-    if not result["feasible"]:
-        return None, result
-    routes = result["routes"]
-    result["two_way_mip_routes"] = RH.two_way_solution_cost(problem_instance, routes)
-    RH.add_to_feasible_solution(problem_instance, routes)
-    solution = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
-    solution.mip_result = result
-    set_two_way_cost(problem_instance, solution)
-    result["two_way"] = solution.two_way
-    return solution, result
-
 def set_two_way_cost(problem_instance, solution):
     """solution.two_way = RH.two_way_solution_cost of its SEV routes, solution.two_way_cost = its cost."""
     if solution is None:
@@ -588,25 +561,6 @@ def set_two_way_cost(problem_instance, solution):
                             "route_costs": [], "route_trips": [], "infeasible_routes": []}
     solution.two_way_cost = solution.two_way["cost"]
     return solution.two_way
-
-def select_initial_by_two_way(problem_instance, candidates):
-    """
-    Pick the initial solution among candidates [(method name, multi-trip solution or None), ...]
-    by the two-way cost: feasible solutions first, then the smallest two-way cost (vehicles +
-    distance + detours + trips with the minimum on-time transshipments). Ties keep the earlier
-    candidate. :return: (method name, solution) or (None, None)
-    """
-    best = (None, None)
-    best_key = None
-    for name, solution in candidates:
-        if solution is None:
-            continue
-        if not hasattr(solution, "two_way"):
-            set_two_way_cost(problem_instance, solution)
-        key = (not (solution.is_feasible and solution.two_way["feasible"]), solution.two_way_cost)
-        if best_key is None or key < best_key:
-            best, best_key = (name, solution), key
-    return best
 
 def get_initial_solution(problem_instance, nof_initializations = 1, read_initials = False):    
 

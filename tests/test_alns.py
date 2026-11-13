@@ -90,13 +90,13 @@ def test_repair_operators(start, repair):
     assert check["feasible"] and check["cost"] == pytest.approx(search.cost(out))
 
 
-def test_alns_initial_stores_the_elite(start):
+def test_alns_improve_stores_the_elite(start):
     p, routes = start
     with contextlib.redirect_stdout(io.StringIO()):
         solution = RH.check_feasibility(p, routes, VRP_only=False, multi_trip=True, single_route_MVRP=False)
     p.heuristics_solutions = []
     with contextlib.redirect_stdout(io.StringIO()):
-        improved, report = MLD.alns_initial(p, solution, seed=2, iterations=10, time_limit=None)
+        improved, report = MLD.alns_improve(p, solution, seed=2, iterations=10, time_limit=None)
     assert improved.is_feasible and improved.two_way_cost == pytest.approx(report["final_cost"])
     assert 1 <= len(p.heuristics_solutions) <= ALNS.ALNS_ELITE
     best = sorted(sorted(r) for r in indices([list(r.sequence) for r in improved.routes_sevs]))
