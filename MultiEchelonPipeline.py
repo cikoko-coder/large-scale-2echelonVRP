@@ -43,6 +43,8 @@ SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of 
 FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
 FE_ROUTE_CHECK = "dp"      # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
 #                            no minimum-transshipment bound), "dp" = the two-way DP of the search
+INCUMBENT_ROUTE_MIP = True # on every FE incumbent update, re-solve its routes by the fixed-route street MILP
+#                            (cheapest, any number of transshipments) and keep it if the 2E objective improves
 
 RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)
 LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
@@ -219,6 +221,7 @@ def run_instance(instance_name: str, reports: dict):
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
     RH.TWO_WAY_OBJECTIVE = TWO_WAY_OBJECTIVE
+    RH.INCUMBENT_ROUTE_MIP = INCUMBENT_ROUTE_MIP
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
     MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     out = []
@@ -288,6 +291,10 @@ def run_instance(instance_name: str, reports: dict):
          f"objective {len(problem.inf_solutions)}")
     if mip_log is not None:
         emit("  " + summarize_mip_calls(mip_log, n_mip).replace("\n", "\n  "))
+    for rec in getattr(problem, "incumbent_refinements", []):
+        emit(f"  incumbent {round(rec['objective'], 1)} ({rec['trips']} trips) re-solved by the fixed-route MILP: "
+             + (f"{round(rec['refined_objective'], 1)} ({rec['refined_trips']} trips)" if rec["refined_objective"] is not None
+                else f"not better ({rec['refined_trips']} trips)") + (" -> new incumbent" if rec["improved"] else ""))
     for k, sol in enumerate(problem.feas_solutions):
         emit(f"  solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, {sol.nFEVs} FEVs, "
              f"travel total {round(sol.travelTotal, 1)}")

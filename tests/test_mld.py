@@ -157,3 +157,21 @@ def test_optimize_fe_takes_only_the_fewest_sevs(start):
     assert n == 1 and len(p.checked_solutions) == 1 and len(p.checked_solutions[0]) == len(routes)
     assert best is not None and best.is_feasible and best.nSEVs == len(routes)
     assert RH.ROUTE_CHECK == "dp"                                          # restored after the FE stage
+
+
+def test_incumbent_is_rechecked_by_the_fixed_route_milp(start, monkeypatch):
+    p, routes = start
+    random.seed(6)
+    monkeypatch.setattr(RH, "INCUMBENT_ROUTE_MIP", True)
+    p.heuristics_solutions, p.checked_solutions, p.feas_solutions, p.inf_solutions = [], [], [], []
+    p.best_found, p.cutoff, p.incumbent_refinements = None, float("inf"), []
+    RH.add_to_feasible_solution(p, routes)
+    with contextlib.redirect_stdout(io.StringIO()):
+        best, _ = MLD.Optimize_FE(p, None, "dp")
+    assert best is not None and best.is_feasible
+    assert p.incumbent_refinements, "every incumbent update is re-checked"
+    rec = p.incumbent_refinements[0]
+    assert rec["refined_trips"] is not None and rec["refined_trips"] >= len(routes)
+    # the re-check never makes the incumbent worse and leaves the route check as it was
+    assert best.objective <= rec["objective"] + 1e-6
+    assert RH.ROUTE_CHECK == "dp" and not getattr(p, "_refining_incumbent", False)

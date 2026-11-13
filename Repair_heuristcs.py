@@ -1904,9 +1904,47 @@ def check_2EVRP_solution(problem_instance, multi_trip_solution, remove_satellite
                          updated = True
                  if updated:
                     problem_instance.best_found = final_solution
-                    
-            
+        if problem_instance.best_found is final_solution and INCUMBENT_ROUTE_MIP:
+            refine_incumbent_by_route_mip(problem_instance, final_solution)
+
     return final_solution
+
+#on every incumbent update of the FE solver, re-solve the incumbent's SE routes by the fixed-route
+#street MILP (cheapest plan, any number of transshipments) and keep it if the 2E objective improves
+INCUMBENT_ROUTE_MIP = True
+
+def refine_incumbent_by_route_mip(problem_instance, incumbent):
+    """
+    Incumbent update of the FE solver: the SE routes of the new incumbent are solved again by the
+    fixed-route street MILP (route_mip_check: minimum SE cost, no minimum-transshipment bound, so a
+    cheaper plan with more transshipments is allowed), then the multi-trip solution and the FE MILP
+    (its cutoff is the incumbent objective, so only a better two-echelon solution passes and becomes
+    problem.best_found). A record (objective, trips before and after) goes to
+    problem.incumbent_refinements. :return: problem.best_found
+    """
+    global ROUTE_CHECK
+    if getattr(problem_instance, "_refining_incumbent", False) or ROUTE_CHECK == "mip":
+        return problem_instance.best_found
+    before = ROUTE_CHECK
+    ROUTE_CHECK = "mip"
+    problem_instance._refining_incumbent = True
+    record = {"objective": incumbent.objective, "trips": len(incumbent.transshipments),
+              "nFEVs": incumbent.nFEVs, "refined_objective": None, "refined_trips": None, "improved": False}
+    try:
+        routes = [list(route.sequence) for route in incumbent.routes_sevs]
+        solution = check_MVRP_solution(problem_instance, routes)
+        if solution.is_feasible:
+            record["refined_trips"] = len(solution.transshipments)
+            record["refined_street"] = solution.travelStreet
+            refined = check_2EVRP_solution(problem_instance, solution)
+            if refined.is_feasible:
+                record["refined_objective"] = refined.objective
+                record["improved"] = problem_instance.best_found is refined
+    finally:
+        ROUTE_CHECK = before
+        problem_instance._refining_incumbent = False
+    problem_instance.__dict__.setdefault("incumbent_refinements", []).append(record)
+    return problem_instance.best_found
 
 def check_MVRP_given(problem_instance, routes, assignments):
     final_solution = sev.two_echelon_solution() #reinitilize
