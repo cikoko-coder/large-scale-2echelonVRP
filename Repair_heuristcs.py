@@ -169,17 +169,37 @@ def two_way_transshipment_checking(problem_instance, route):
     :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
     """
     result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)
+    returns_in_time(problem_instance, route, result)
     result["min_trips_on_time"] = result["n_trips"] if result["feasible"] else None
     return result
+
+def returns_in_time(problem_instance, route, result):
+    """Exact end-of-shift check of a feasible refill plan: the vehicle is back at the garage by
+    its end, finish (end of the last service) + t(last customer, garage) <= garage end. Sets
+    result["feasible"] = False (result["late_return"] = lateness) otherwise. With unbounded vehicle
+    time the garage end is far after every customer window and the check never binds.
+    :return: result["feasible"]"""
+    if result["feasible"] and route:
+        back = result["finish"] + problem_instance.travel_matrix[route[-1].index][0]
+        late = back - getattr(problem_instance.depot, "end_interval", math.inf) #no garage end: unbounded
+        if late > TIME_EPS:
+            result["feasible"] = False
+            result["late_return"] = late
+    return result["feasible"]
 
 def satellite_detour(problem_instance, i, j, matrix = "travel_matrix"):
     """(detour, satellite) of the closest satellite p on the arc i -> j: min over p of
     m(i,p) + m(p,j) - m(i,j) (ties by the smaller index), m = problem_instance.<matrix>.
-    Memoized per problem, matrix and satellite set (the route checks ask for the same arcs again
-    and again)."""
+    Memoized per problem, matrix and satellite set (consolidation swaps problem.satellites for
+    another list); the set's key is built only when the list changes, not on every call."""
     sats = problem_instance.satellites
-    memo = problem_instance.__dict__.setdefault("_satellite_detour_memo", {})
-    memo = memo.setdefault((matrix, tuple(p.index for p in sats)), {}) #consolidation swaps the satellite set
+    current = problem_instance.__dict__.setdefault("_satellite_detour_current", {})
+    entry = current.get(matrix)
+    if entry is None or entry[0] is not sats or entry[1] != len(sats):
+        memo = problem_instance.__dict__.setdefault("_satellite_detour_memo", {})
+        entry = (sats, len(sats), memo.setdefault((matrix, tuple(p.index for p in sats)), {}))
+        current[matrix] = entry
+    memo = entry[2]
     hit = memo.get((i, j))
     if hit is None:
         m = getattr(problem_instance, matrix)
@@ -759,7 +779,7 @@ def check_route_transshipments(problem_instance, route):
     when the tabu search is active (as the MIP does).
     """
     if ROUTE_CHECK == "mip":
-        return MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
+        return route_mip_check(problem_instance, route)
     if len(route) == 0:
         return True, 0, [], route
     result = route_refill_plan(problem_instance, route)
@@ -770,6 +790,27 @@ def check_route_transshipments(problem_instance, route):
         if not is_in_tabu_list(problem_instance, route):
             problem_instance.tabu_list.append([x.index for x in route])
     return False, MathModels.bigNumber, [], []
+
+def route_mip_check(problem_instance, route):
+    """
+    SolveFixedSEVRouteMILP with memo (manuscript Algorithm 10): MathModels.street_problem_MIP of the
+    fixed customer order, which places the transshipments at minimum cost (no minimum-transshipment
+    bound). The result is cached per customer sequence and satellite set; an infeasible route goes
+    to the tabu list inside the MIP call (tabu search active, not during consolidation).
+    :return: (feasible, cost, visits, route), the check_route_transshipments interface
+    """
+    if len(route) == 0:
+        return True, 0, [], route
+    cache = problem_instance.__dict__.setdefault("_route_mip_cache", {})
+    key = (tuple(x.index for x in route), tuple(p.index for p in problem_instance.satellites))
+    hit = cache.get(key)
+    if hit is None:
+        feasible, cost, visits, _ = MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
+        hit = (feasible, cost, [list(v) for v in visits])
+        cache[key] = hit
+    feasible, cost, visits = hit
+    #callers append the trip load to every visit: hand out copies
+    return feasible, cost, [list(v) for v in visits], (route if feasible else [])
 
 def mip_checking(problem_instance, route):
 
@@ -985,27 +1026,13 @@ def insert_into_every_index_slack(problem_instance, input_list, item):
         if service_start > item.end_interval:
             continue
         next_arrival = service_start + item.unloading_time + problem_instance.distance_matrix[item.index][next_node.index]
-        #makespan_cost =  problem_instance.latest_times_feasible[next_node.index] - next_arrival 
-        
-        #if makespan_cost < 0:
-            #print("infeasible due to time window violation detected in slack time based insertion list generation")
-        #    continue
-            
         if next_arrival <= problem_instance.latest_times_feasible[next_node.index]:
             candidate = input_list[:i] + [item] + input_list[i:]
-
-            if get_makespan(problem_instance, candidate) > 1:
-                continue            
-            
-            makespan_cost =  max(0,problem_instance.latest_times_feasible[next_node.index] - next_arrival )
-            
             distance_cost = get_min_multi_trip_cost(problem_instance, candidate) - initial_cost            
             
             feasible_solutions.append([True, candidate, distance_cost]) 
    
-    #insertions represent the candidate route first, then objective change, then makespan change, then the cost of the route with the insertion, then the cost of the route without the insertion, then the index of insertion
-    #AT INDEX one THE ROUTE MODIFIED BY THE INSERTION
-    #AT INDEX two THE COST OF THE ROUTE WITH THE INSERTION
+    #each insertion: [True, candidate route, increase of the minimum multi-trip distance cost]
     return feasible_solutions
 
 def get_min_multi_trip_cost(problem_instance, route):
@@ -1033,62 +1060,6 @@ def get_min_multi_trip_cost(problem_instance, route):
     cost_trips =  problem_instance.trip_unit_cost*min_transfer
     
     return cost_v   + cost_trips #+ problem_instance.cost_vehicle_use
-
-def get_makespan(problem_instance, route): #check feasibility in time, use the lowet bound 
-    
-    arcs_no_trip = MathModels.generate_arcs(route)
-
-    arcs_with_trip = [satellite_detour(problem_instance, i, j, "distance_matrix")[0]
-                       for [i,j] in arcs_no_trip if j!=0]
-
-    min_transfer = math.ceil((sum([node.demand for node in route]) )/problem_instance.capacity_SEV)
-    arcs_with_trip.sort()
- 
-    #num_bins = min_transfer
-    #bin_size = len(route) // num_bins
-    #cutting_points = [i * bin_size for i in range(0, num_bins)]    
-
-    min_satellite_visit_cost =  sum(arcs_with_trip[:min_transfer]) 
-
-    #min_satellite_visit_cost =  sum(arcs_with_trip[x] for x in cutting_points) 
-
-    arc_cost = sum(problem_instance.distance_matrix[i][j] for [i,j] in arcs_no_trip)
-    service_sum = sum(x.unloading_time for x in route) + min_transfer*problem_instance.TransferDuration
-    make = min_satellite_visit_cost + arc_cost + service_sum
-
-    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
-    
-    return minSEvs
-
-def get_makespan2(problem_instance, route):
-    
-    distances = [problem_instance.distance_matrix[route[i].index][route[i + 1].index] for i in range(len(route) - 1)]
-    distances.append(problem_instance.distance_matrix[route[-1].index][0])  
-    distances.append(problem_instance.distance_matrix[0][route[0].index])  
-    dist_sum = sum(distances)
-    service_sum = sum(x.unloading_time for x in route)
-    make = dist_sum + service_sum
-    
-    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
-
-    return minSEvs
-
-def divide_routes(problem_instance, route, minSEVS):
-    routes = []
-    node_list = [copy.deepcopy(x) for x in route]
-    for i in range(minSEVS):
-        route = []
-        for node in node_list:
-            route.append(node)
-            nof_sev = get_makespan(problem_instance, route)
-            if nof_sev >1:
-                route.remove(node)
-                routes.append(copy.deepcopy(route))
-                break
-            else:
-                node_list.remove(node)
-                
-    return routes
 
 def update_intervals(problem_instance, routes):
     problem_instance.earliest_times_feasible = [problem_instance.depot.start_interval]*(len(problem_instance.nodes))
@@ -1139,16 +1110,6 @@ def get_latest_times(problem_instance, route):
 def contains_subset(main_array, sub_array):
     it = iter(main_array)
     return 
-def is_feasible_list(problem_instance, route):
-    #return False
-    list_in = [x.index for x in route]
-    cost = None
-    list_nn = [x for x in problem_instance.feasible_list if x [0] == list_in]
-    if list_nn:            
-        return True, list_nn[0][1]
-        
-    return False, cost
-
 def is_in_tabu_list(problem_instance, route):
     
     list_in = [x.index for x in route]
@@ -1164,8 +1125,6 @@ def is_in_tabu_list(problem_instance, route):
 def is_route_feasible(problem_instance, route):      
            
     
-    if get_makespan(problem_instance, route) > 1:
-        return False, route, BigNumber
     if is_in_tabu_list(problem_instance, route):
         return False, route, BigNumber
     
@@ -1185,10 +1144,10 @@ def is_route_feasible(problem_instance, route):
             optimal = bothway_optimal_checking(problem_instance, route)
         else:
             optimal = optimal_transshipment_checking(problem_instance, route)
+        if REFILL_RULE != "two_way": #two_way_transshipment_checking checks the return itself
+            returns_in_time(problem_instance, route, optimal)
         if not optimal["feasible"]:
             return False, route, BigNumber
-        #the street MIP has no constraint on the return to the garage, so the finish time of the
-        #plan is not checked against the garage end (unbounded vehicle time)
         if ROUTE_CHECK == "mip":
             feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
             return feas, route, cost
@@ -1247,8 +1206,6 @@ def remove_infeasible_nodes_slack(problem_instance, route):
             print("stop")
         feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         if feasibility:
-            if not is_feasible_list(problem_instance, route):
-                problem_instance.feasible_list.append([x.index for x in route])
             break
         
         if len(pool) + len(route) != initial_served:
@@ -1347,8 +1304,6 @@ def remove_infeasible_nodes(problem_instance, route):
             print("stop")
         feasibility, cost, visits, route_return = check_route_transshipments(problem_instance, route)
         if feasibility:
-            if not is_feasible_list(problem_instance, route):
-                problem_instance.feasible_list.append([x.index for x in route])
             break
         
         if len(pool) + len(route) != initial_served:
@@ -1414,45 +1369,39 @@ def add_feasible_points(problem_instance, solution_indices):
     problem_instance.points_found.append([found_time, solution_indices])
     return
 
-def add_to_feasible_solution(problem_instance,solution, tabu_search = False): 
+def solution_sequence_key(sequences):
+    """Key of a route set (customer-index sequences): the order of the routes does not matter,
+    the order of the customers in a route does."""
+    return tuple(sorted(tuple(sequence) for sequence in sequences))
 
+def add_to_feasible_solution(problem_instance, solution, tabu_search = False):
+    """
+    Store a complete route set (all customers served) once: in problem.heuristics_solutions, or in
+    problem.tabu_list with tabu_search. Duplicates are found by a set of keys
+    (solution_sequence_key) kept next to the list; the list is append-only (its order is the order
+    of discovery) and the key set is rebuilt when the list was replaced or changed elsewhere.
+    :return: True if the route set was new
+    """
     if sum(len(x) for x in solution) != len(problem_instance.customers): #partial solution
         return False
-
-    list_of_found =  problem_instance.heuristics_solutions  
-    if tabu_search:
-        list_of_found =  problem_instance.tabu_list
-    if not list_of_found:
-        sequence_current = [[x.index for x in route] for route in solution]
-        sequence_current.sort(key=lambda x: x[0])
-        list_of_found.append(sequence_current)
-        add_feasible_points(problem_instance, sequence_current)
-        return True
-    # Assuming we have a list of lists with each inner list containing an object with an attribute called 'attribute_to_sort_by'
-    # Sorting the list of lists by the value of the attribute for the first element
-    list_of_found.sort(key=lambda x: len(x))
-    
+    name = "tabu_list" if tabu_search else "heuristics_solutions"
+    list_of_found = getattr(problem_instance, name)
+    keys = problem_instance.__dict__.setdefault("_found_keys", {})
+    entry = keys.get(name)
+    if entry is None or entry[0] is not list_of_found or entry[1] != len(list_of_found):
+        entry = [list_of_found, len(list_of_found), set(solution_sequence_key(x) for x in list_of_found)]
+        keys[name] = entry
     sequence_current = [[x.index for x in route] for route in solution]
     sequence_current.sort(key=lambda x: x[0])
-    
-    for sequence_found in list_of_found:
-        found = True
-        if len(sequence_current) != len(sequence_current):
-            found = False
-            continue       
-        
-        if sequence_current != sequence_found:
-            found = False
-        else:
-            break
-
-    if not found:
-        list_of_found.append(sequence_current)
-        
-        add_feasible_points(problem_instance, sequence_current)
-        return True
-    else:
+    key = solution_sequence_key(sequence_current)
+    if key in entry[2]:
         return False
+    list_of_found.append(sequence_current)
+    entry[1] += 1
+    entry[2].add(key)
+    add_feasible_points(problem_instance, sequence_current)
+    return True
+
 def check_found_solutions(problem_instance):     
     solutions_to_scheck = []
 
@@ -1652,8 +1601,6 @@ def check_MVRP_solution(problem_instance, routes):
                     return final_solution
 
         else:
-            if not is_feasible_list(problem_instance, route):
-                problem_instance.feasible_list.append([x.index for x in route])
             newRoute = sev.street_vehicle()
             newRoute.sequence.extend(route) 
             newRoute.cost = cost

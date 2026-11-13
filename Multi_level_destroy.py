@@ -357,12 +357,16 @@ def get_weights_for_nodes_removal(customers_to_select, pool):
     return [x/total for x in weights]
 
 
-def Optimize_FE(problem_instance, max_candidates = None):
+def Optimize_FE(problem_instance, max_candidates = None, route_check = "mip"):
     """
-    Algorithm 8 on S*_SE: the stored route sets with the fewest SEVs (ranked by two-way cost,
-    at most max_candidates) go through RH.check_found_solutions: multi-trip / MVRP check, the FE
-    routing MILP (FEVmodels.water_problem_MIP) and the satellite-removal consolidation, repeated while
-    it improves. :return: (problem.best_found, number of SE solutions sent to the FE level)
+    Algorithm 8 on S*_SE: every stored route set with the fewest SEVs (solutions with more SEVs are
+    discarded; ranked by two-way cost, at most max_candidates, None = all) goes through
+    RH.check_found_solutions. Its route-level checks run with RH.ROUTE_CHECK = route_check: "mip"
+    re-optimizes every route by the fixed-route street MILP (SolveFixedSEVRouteMILP, memoized), which
+    places the transshipments at minimum SE cost without the minimum-transshipment bound of the
+    two-way DP. Then the multi-trip / MVRP check, the FE routing MILP (FEVmodels.water_problem_MIP)
+    and the satellite-removal consolidation, repeated while it improves.
+    :return: (problem.best_found, number of SE solutions sent to the FE level)
     """
     ranked = []
     for sequences in problem_instance.heuristics_solutions:
@@ -377,8 +381,14 @@ def Optimize_FE(problem_instance, max_candidates = None):
     if max_candidates is not None:
         ranked = ranked[:max_candidates]
     problem_instance.heuristics_solutions = [sequences for _, sequences in ranked]
-    RH.check_found_solutions(problem_instance)
+    before = RH.ROUTE_CHECK
+    RH.ROUTE_CHECK = route_check
+    try:
+        RH.check_found_solutions(problem_instance)
+    finally:
+        RH.ROUTE_CHECK = before
     return problem_instance.best_found, len(ranked)
+
 
 # Local search: the two operators (relocate, 2-opt* = tail exchange, the revised one-point
 # crossover) live in local_search.py; every move is decided by the two-way check with the
@@ -533,7 +543,7 @@ def get_initial_solution(problem_instance, nof_initializations = 1, read_initial
 
 def write_out_all_initials(problem_instance, runtime):
     #write out all initial solutions
-    path = "init_solutions_makespan_" + str(problem_instance.name) +"_"+str(len(problem_instance.customers))+ ".txt"
+    path = "init_solutions_" + str(problem_instance.name) +"_"+str(len(problem_instance.customers))+ ".txt"
 
     with open(path, 'w') as file:
         for sol_array in problem_instance.heuristics_solutions:

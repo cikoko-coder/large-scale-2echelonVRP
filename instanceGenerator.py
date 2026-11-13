@@ -282,7 +282,6 @@ class instance:
         self.inf_solutions = [] 
         self.checked_solutions = [] 
         self.tabu_list = []   
-        self.feasible_list = []
         self.earliest_times_feasible = []
         self.latest_times_feasible  = []
         self.best_found = None 
@@ -559,20 +558,6 @@ class instance:
         self.closest_satellite_network.distance_matrix = self.DistMatrix  
 
         return
-def read_initial_case(problem):
-    import Repair_heuristcs as RH
-    best_initial_routes = RH.read_initial_SEV_routes_use_case(problem, "initial_300.txt")
-    min_SEVS = RH.get_makespan(problem, best_initial_routes[0])
-    best_initial_routes = RH.divide_routes(problem, best_initial_routes[0], min_SEVS)
-    RH.add_to_feasible_solution(problem, best_initial_routes)
-
-    initial_solution = RH.check_feasibility(problem, best_initial_routes)
-    RH.check_found_solutions(problem)
-
-    if problem.best_found is not None:
-        initial_solution = problem.best_found
-
-    return initial_solution
 def read_satellites(file_content):
 # Usage
     #type0,index1,name2,xcor3,ycor4,road_node5,canal_node6  0-S,1-P010,2-TF_10,3-4.89616373994886,4-52.3622724117054,5-102271,6-222
@@ -772,7 +757,6 @@ def read_generate_case(demand_set = 1, nof_horeca = 1600, nof_satellites = 10, s
     if unbounded_vehicle_time: #customer time windows define the timing, vehicles are free in time
         problem.set_unbounded_vehicle_time()
     
-    #read_initial_case()
     return problem 
 
 def check_feasibility_all_nodes(problem):
