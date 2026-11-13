@@ -179,3 +179,29 @@ LBBD elements already in the heuristic (kept as reference, not implemented as B&
 street routes with the closest-satellite relaxation (M, eq. 42-47), subproblem = water MIP
 with synchronization (S), tabu list = no-good feasibility cut (59), cutoff = incumbent bound,
 multiple initial solutions tested by S (Sec. 4.3.3). Next: the large-scale iterated heuristic.
+
+## 7. Two-pass engine for the bothway checks (2026-11-13)
+
+`Repair_heuristcs.REFILL_DP` selects the engine behind `optimal_transshipment_checking` and
+`bothway_optimal_checking`: `"two_pass"` (default, `two_pass_transshipment_checking`) or
+`"bounded"` (the previous engine, now `bounded_transshipment_checking`). Same rules, arguments
+and result dict.
+
+* Pass 1, minimum trips K*: earliest service start A[k][p] per (trip, start position), states
+  expanded inside window(k, K) for K = m, m+1, ...; a state with fewer trips at p and an earlier
+  or equal time dominates. Two changes to the pseudocode: a state is expanded again when its time
+  improves after its first expansion (a wider window at K+1 can give an earlier time), and the
+  dominance test only uses states that were actually expanded.
+* Pass 2, cheapest plan with K trips: Pareto labels (time, cost) per (k, p) inside the windows.
+  K grows while vehicle + distance + det[0] + K * trip_unit_cost < incumbent; for K*+1 this is
+  the "best <= R" test of the design, and it repeats for K*+2, ... (needed when
+  trip_unit_cost = 0, the paper setting).
+* Settled points: every trip counts one trip_unit_cost (first load included), as the street MIP
+  and the bounded engine; the transfer duration is added to the refill arrival with det[q]; the
+  detour before the first customer is part of the cost.
+* Diagnostics: `attempts[K]` for K < K* and `blocked` for K = m keep the previous messages.
+
+Checks: brute force on 4000 + 3000 random routes and on 400 routes with K* > m (K*, feasibility,
+cost), the bounded engine on 1500 routes of 15-60 customers and 1200 subsequences of
+c201/c208/r208/rc208: no difference. Speed about the same on the benchmarks, 1.6x faster on the
+long random routes. 29 tests pass with either engine.
