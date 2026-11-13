@@ -41,11 +41,17 @@ ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or 
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
 REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
-# initial solution: "heuristic" (multi-start insertion), "mip" (free street routing MIP over all
-# customers, MathModels.street_routing_MIP) or "heuristic+mip" (the MIP warm-started with the
-# best heuristic routes). The MIP needs a full Gurobi license for 100 customers (the pip
-# size-limited license stops at 2000 variables).
-INITIAL_METHOD = "heuristic"
+# initial solution:
+#   "heuristic"          multi-start insertion only
+#   "mip"                free street routing MIP over all customers only (MathModels.street_routing_MIP)
+#   "heuristic+free_mip" both as two independent initialization methods: the MIP gets NO routes
+#                        (no warm start, no fixed arcs); both route sets are stored for the
+#                        two-echelon check and the initial solution is the one with the smaller
+#                        two-way cost (RH.two_way_solution_cost)
+#   "heuristic+mip"      the MIP warm-started with the best heuristic routes
+# The MIP needs a full Gurobi license for 100 customers (the pip size-limited license stops at
+# 2000 variables); if it fails the heuristic solution is used.
+INITIAL_METHOD = "heuristic+free_mip"
 MIP_INITIAL_TIMELIMIT = 600   # seconds for the free routing MIP
 MIP_INITIAL_CUSTOMERS = None  # None: all customers; an int n restricts the instance to the first n customers (testing)
 
@@ -375,18 +381,22 @@ def run_initial_construction(instance_name: str, reports: dict):
     n_mip = len(mip_log) if mip_log is not None else 0
     t1 = time.time()
     construction = None
-    if INITIAL_METHOD in ("heuristic", "heuristic+mip"):
+    candidates = []  # (method, multi-trip solution); the initial solution is chosen by the two-way cost
+    if INITIAL_METHOD in ("heuristic", "heuristic+mip", "heuristic+free_mip"):
         construction = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
         t_construction = time.time() - t1
         emit("")
         emit(f"--- step 1: multi-start construction ({START_CONS} starts) + transshipment check per route ({RH.ROUTE_CHECK}): {t_construction:.2f}s")
         for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
+            MLD.set_two_way_cost(problem, sol)
             emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'} multi-trip solution, "
-                 f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}")
+                 f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}, "
+                 f"two-way cost {round(sol.two_way_cost, 1)}")
         emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
-    if INITIAL_METHOD in ("mip", "heuristic+mip"):
+        candidates.append(("heuristic", construction))
+    if INITIAL_METHOD in ("mip", "heuristic+mip", "heuristic+free_mip"):
         warm = None
-        if construction is not None and construction.is_feasible:
+        if INITIAL_METHOD == "heuristic+mip" and construction is not None and construction.is_feasible:
             warm = [route.sequence for route in construction.routes_sevs]
         t1 = time.time()
         try:
@@ -397,18 +407,30 @@ def run_initial_construction(instance_name: str, reports: dict):
                                               "time": time.time() - t1, "objective": math.inf, "gap": math.inf}
         emit("")
         emit(f"--- step 1{'b' if construction is not None else ''}: free street routing MIP over {len(problem.customers)} customers"
-             f"{' warm-started with the heuristic routes' if warm else ''}, time limit {MIP_INITIAL_TIMELIMIT}s: {mip_result['time']:.1f}s")
+             f"{' warm-started with the heuristic routes' if warm else ' (no routes passed, no warm start)'}, "
+             f"time limit {MIP_INITIAL_TIMELIMIT}s: {mip_result['time']:.1f}s")
         emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {GUROBI_STATUS.get(mip_result['status'], mip_result['status'])}, "
              f"objective {round(mip_result['objective'], 1) if mip_result['feasible'] else '-'}, gap {round(mip_result['gap'], 4) if mip_result['feasible'] else '-'}")
         if mip_result["feasible"]:
             emit(f"  objective parts: vehicles {mip_result['fixed_vehicle_cost']}, distance {round(mip_result['distance_travel_cost'], 1)}, "
                  f"detours {round(mip_result['lead_time_cost'], 1)}, transshipments {mip_result['transshipment_cost']} ({len(mip_result['visits'])})")
-            emit(describe_solution(problem, mip_solution, "MIP multi-trip solution (street level, transshipments re-placed by the DP)"))
-            if construction is None or not construction.is_feasible or (
-                    mip_solution.is_feasible and mip_solution.objective < construction.objective):
-                construction = mip_solution
+            tw = mip_result["two_way_mip_routes"]
+            emit(f"  two-way check of the MIP routes: feasible {tw['feasible']}, cost {round(tw['cost'], 1)}, "
+                 f"{tw['n_vehicles']} SEVs, {tw['n_trips']} trips (MIP: {len(mip_result['visits'])} transshipments)")
+            emit(describe_solution(problem, mip_solution, "MIP multi-trip solution (street level, transshipments re-placed by the two-way DP)"))
+            emit(f"  two-way cost of the MIP multi-trip solution {round(mip_solution.two_way_cost, 1)}")
+            candidates.append(("free_mip" if warm is None else "warm_mip", mip_solution))
         else:
             emit("  no MIP solution")
+    method, chosen = MLD.select_initial_by_two_way(problem, candidates)
+    if chosen is not None:
+        construction = chosen
+        emit("")
+        emit("initial solution decided by the two-way cost: " + ", ".join(
+            f"{name} {round(sol.two_way_cost, 1)}" for name, sol in candidates if sol is not None)
+             + f" -> {method}")
+    problem.initial_method = method
+    problem.initial_candidates = candidates
     if mip_log is not None:
         emit(summarize_mip_calls(mip_log, n_mip))
     emit(f"complete route sets stored for the two-echelon check: {len(problem.heuristics_solutions)}")

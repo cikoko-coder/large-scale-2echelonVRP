@@ -688,9 +688,58 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
 #  "mip" -> MathModels.street_problem_MIP
 ROUTE_CHECK = "dp"
 
+def route_refill_plan(problem_instance, route):
+    """
+    Refill plan of one fixed route by the DP of REFILL_RULE (the rule of is_route_feasible):
+    "two_way" -> two_way_transshipment_checking (minimum transshipments K*, then cheapest),
+    "optimal" -> bothway_optimal_checking (exactly m), otherwise optimal_transshipment_checking
+    (cheapest with any number). :return: the DP result dict (cost includes the vehicle cost)
+    """
+    if REFILL_RULE == "two_way":
+        return two_way_transshipment_checking(problem_instance, route)
+    if REFILL_RULE == "optimal":
+        return bothway_optimal_checking(problem_instance, route)
+    return optimal_transshipment_checking(problem_instance, route)
+
+def two_way_solution_cost(problem_instance, routes):
+    """
+    Street cost of a complete route set decided by the two-way check: every route gets the plan
+    of two_way_transshipment_checking (minimum number of on-time transshipments K*, then the
+    cheapest plan with K*), the solution cost is the sum of the route costs, each = vehicle use +
+    c^s (distance + detours) + trip_unit_cost per trip. Used to compare initial solutions of
+    different methods (heuristic construction, free routing MIP) on one scale, independent of
+    REFILL_RULE and of the MIP's own objective.
+    :return: dict feasible, cost (BigNumber if a route is infeasible), n_vehicles, n_trips,
+             served, route_costs, route_trips, infeasible_routes (indices)
+    """
+    out = {"feasible": True, "cost": 0.0, "n_vehicles": 0, "n_trips": 0, "served": 0,
+           "route_costs": [], "route_trips": [], "infeasible_routes": []}
+    for r, route in enumerate(routes):
+        if len(route) == 0:
+            continue
+        out["n_vehicles"] += 1
+        out["served"] += len(route)
+        plan = two_way_transshipment_checking(problem_instance, route)
+        if not plan["feasible"]:
+            out["feasible"] = False
+            out["infeasible_routes"].append(r)
+            out["route_costs"].append(BigNumber)
+            out["route_trips"].append(None)
+            continue
+        out["route_costs"].append(plan["cost"])
+        out["route_trips"].append(plan["n_trips"])
+        out["n_trips"] += plan["n_trips"]
+        out["cost"] += plan["cost"]
+    if out["served"] != len(problem_instance.customers):
+        out["feasible"] = False
+    if not out["feasible"]:
+        out["cost"] = BigNumber
+    return out
+
 def check_route_transshipments(problem_instance, route):
     """
-    Transshipment plan of ONE fixed route, the street_problem_MIP interface:
+    Transshipment plan of ONE fixed route (DP of REFILL_RULE, route_refill_plan; default
+    "two_way"), the street_problem_MIP interface:
     (feasible, cost, visits, route) with cost = the street travel cost of the route, c^s *
     (distance + detours) + trip_unit_cost per transshipment (no vehicle cost), and
     visits = [[customer, satellite], ...] in route order.
@@ -701,7 +750,7 @@ def check_route_transshipments(problem_instance, route):
         return MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
     if len(route) == 0:
         return True, 0, [], route
-    result = optimal_transshipment_checking(problem_instance, route)
+    result = route_refill_plan(problem_instance, route)
     if result["feasible"]:
         visits = [[i, result["satellites"][i]] for i in result["refills"]]
         return True, result["cost"] - problem_instance.cost_vehicle_use, visits, route
