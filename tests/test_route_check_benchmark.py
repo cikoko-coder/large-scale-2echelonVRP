@@ -83,3 +83,30 @@ def test_free_routing_mip_routes_are_dp_feasible(problem):
     assert warm["feasible"] and warm["objective"] <= res["objective"] + 1e-3
     with pytest.raises(ValueError):
         MathModels.street_problem_MIP(problem, 10)
+
+
+def test_is_route_feasible_uses_the_two_way_rule():
+    """is_route_feasible (REFILL_RULE "two_way"): feasibility of the DP, cost of the plan with the
+    minimum number of transshipments K*; paper costs (no trip cost), so the cheapest plan may use more."""
+    assert RH.REFILL_RULE == "two_way"
+    with contextlib.redirect_stdout(io.StringIO()):
+        p = instanceGenerator.readGenerate_benchmark("rc201.txt", 100, unbounded_vehicle_time=True, cost_setting="paper")
+    p.tabu_search_active = False
+    rng = random.Random(5)
+    customers = sorted(p.customers, key=lambda node: node.start_interval)
+    checked = 0
+    for _ in range(400):
+        size = rng.randint(2, 15)
+        start = rng.randint(0, len(customers) - size)
+        route = customers[start:start + size]
+        if RH.get_makespan(p, route) > 1:
+            continue
+        two_way = RH.two_way_transshipment_checking(p, route)
+        feasible, _, cost = RH.is_route_feasible(p, route)
+        assert feasible == two_way["feasible"]
+        if feasible:
+            checked += 1
+            assert cost == pytest.approx(two_way["cost"] - p.cost_vehicle_use, abs=1e-6)
+            cheapest = RH.optimal_transshipment_checking(p, route)
+            assert cheapest["n_trips"] >= two_way["n_trips"] and cheapest["cost"] <= two_way["cost"] + 1e-6
+    assert checked >= 20

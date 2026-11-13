@@ -205,3 +205,40 @@ Checks: brute force on 4000 + 3000 random routes and on 400 routes with K* > m (
 cost), the bounded engine on 1500 routes of 15-60 customers and 1200 subsequences of
 c201/c208/r208/rc208: no difference. Speed about the same on the benchmarks, 1.6x faster on the
 long random routes. 29 tests pass with either engine.
+
+## 8. Two-way rule in is_route_feasible (2026-11-13)
+
+`REFILL_RULE = "two_way"` (default of `Repair_heuristcs` and the pipeline):
+`two_way_transshipment_checking(problem, route)` = minimum number of transshipments that is on
+time, then the cheapest plan with that number (lexicographic). `is_route_feasible` returns its
+feasibility and cost (vehicle cost excluded).
+
+Why it is optimal for the minimum number of transshipments:
+* m = trips of the greedy split (capacity only) is a lower bound. In every m-trip split the k-th
+  refill lies between the backward (earliest) and forward (latest) greedy positions,
+  backward[k] <= c_k <= forward[k]: later and the first k trips exceed the capacity, earlier and
+  the last m-k trips cannot cover the rest. The windows lose no plan.
+* Time windows can make every m-trip split late, so K* >= m. Refills only add time (waiting is
+  allowed), so per (trip, start position) the earliest service start is the only state needed
+  for feasibility, and fewer trips at the same position with an earlier or equal time dominates.
+  Pass 1 tries K = m, m+1, ... in order: the first K that reaches the end on time is K*.
+* Pass 2 only for K*: Pareto labels (time, cost) in the windows. Travel time and cost coincide
+  on the street level and U is constant, so the closest satellite of a refill position
+  minimizes both the arrival and the detour.
+
+Difference with `"optimal_cost"` (the street MIP's objective): no plan with more than K* trips,
+even when cheaper. With 10000 per trip never the case; with the paper costs (no trip cost) on the
+100-customer routes: 18 of 323 feasible routes would save detour with an extra trip, 174.2 cost
+units in total. `"optimal_cost"` and `"optimal"` (exactly m) stay available.
+
+Check on all SEV routes of the 27 instances (paper best-known routes of `data/sols` and the
+heuristic construction, both cost settings, 814 routes up to 52 customers): two_way equals an
+exact reference DP (no windows, Pareto labels per trip count) in feasibility, K* and cost;
+is_route_feasible returns the two_way cost; two-pass and the street MIP agree.
+
+Also fixed:
+* `TIME_EPS = 1e-9` in all window checks of the refill DPs. Arrivals are sums of Euclidean
+  times and can be 1e-13 past a window end; the bounded engine rejected 3 such routes
+  (r207, r209) that the two-pass engine and the MIP accept.
+* `check_route_transshipments` with `ROUTE_CHECK = "mip"` called itself; it calls
+  `MathModels.street_problem_MIP` now.

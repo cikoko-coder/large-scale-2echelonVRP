@@ -80,13 +80,21 @@ def backward_checking(problem_instance, route):
     return [route[0].index] + [route[pos].index for pos in cut_positions]
 
 #refill rule used by the relaxed route check (is_route_feasible):
+#  "two_way"      -> two_way_transshipment_checking: the minimum number of transshipments K* that
+#                    is on time (K* >= m, more than m only when the time windows force it), then
+#                    the cheapest plan with K* transshipments (lexicographic: transshipments, cost)
 #  "optimal_cost" -> optimal_transshipment_checking: the minimum number of transshipments m is
 #                    the starting bound of the DP; more are used when K = m is not on time or
 #                    when they are cheaper (same solution as the street MIP)
 #  "optimal"      -> bothway_optimal_checking: exactly m transshipments, best refill points
 #                    between the backward and forward bounds (DP); rejects routes needing m+1
 #  "backward" / "forward" -> fixed greedy refill points
-REFILL_RULE = "optimal_cost"
+REFILL_RULE = "two_way"
+
+#tolerance of the time-window checks of the refill DPs: arrivals are sums of Euclidean travel
+#times, so an arrival exactly at the window end can come out 1e-13 too late (the street MIP
+#accepts it within Gurobi's feasibility tolerance)
+TIME_EPS = 1e-9
 
 def refill_points(problem_instance, route):
     """Refill (transfer) points assumed by the relaxed route check, see REFILL_RULE."""
@@ -96,6 +104,8 @@ def refill_points(problem_instance, route):
         return bothway_optimal_checking(problem_instance, route)["refills"]
     if REFILL_RULE == "optimal_cost":
         return optimal_transshipment_checking(problem_instance, route)["refills"]
+    if REFILL_RULE == "two_way":
+        return two_way_transshipment_checking(problem_instance, route)["refills"]
     return backward_checking(problem_instance, route)
 
 def refill_windows(problem_instance, route, n_trips, forward = None, backward = None):
@@ -137,6 +147,31 @@ def bothway_optimal_checking(problem_instance, route):
     """
     return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
 
+def two_way_transshipment_checking(problem_instance, route):
+    """
+    Route feasibility with the MINIMUM number of transshipments that is on time, then the
+    cheapest plan with that number (lexicographic: transshipments first, then cost).
+
+    * m = number of trips of the greedy split (capacity only) is a lower bound. Every split into
+      m trips has its k-th refill between the backward (earliest) and forward (latest) greedy
+      positions, backward[k] <= c_k <= forward[k] (refill_windows), so the windows lose no plan.
+    * K* = the smallest K >= m with an on-time K-trip plan (pass 1 of the two-pass engine):
+      refills only add time, so per (trip, start position) the earliest service start is the only
+      state that matters for feasibility, and a state with fewer trips at the same position and an
+      earlier or equal time dominates. K = m, m+1, ... in order, so the first K that reaches the end
+      on time is the minimum. K* > m only when the time windows make every m-trip split late.
+    * Cheapest plan with exactly K* trips (pass 2: Pareto labels (time, cost) inside the windows);
+      the closest satellite of every refill position minimizes both the arrival and the detour cost.
+
+    Unlike optimal_transshipment_checking, no plan with more than K* trips is considered, even
+    when it would be cheaper (possible when trip_unit_cost is below the detour savings, e.g. the
+    paper setting with trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
+    :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
+    """
+    result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)
+    result["min_trips_on_time"] = result["n_trips"] if result["feasible"] else None
+    return result
+
 def refill_detours(problem_instance, route):
     """(detour, satellite) of the closest satellite for a refill before every route position:
     detour = t(i,p) + t(p,j) - t(i,j) >= 0 with i the predecessor (garage for position 0)."""
@@ -175,7 +210,7 @@ def refill_time_bounds(problem_instance, route, detours = None):
     finish = problem_instance.depot.start_interval + detours[0][0] + transfer
     for pos, node in enumerate(route):
         arrival = finish + drive[pos]
-        if arrival > node.end_interval:
+        if arrival > node.end_interval + TIME_EPS:
             return None
         finish = max(arrival, node.start_interval) + node.unloading_time
         earliest.append(finish)
@@ -188,7 +223,7 @@ def refill_time_bounds(problem_instance, route, detours = None):
     for pos in range(1, n):
         arrival = earliest[pos - 1] + drive[pos] + detours[pos][0] + transfer
         refill_slack.append(min(route[pos].end_interval, latest[pos]) - arrival)
-    can_refill = [slack >= -1e-9 for slack in refill_slack]
+    can_refill = [slack >= -TIME_EPS for slack in refill_slack]
     return earliest, latest, can_refill, refill_slack
 
 def fastest_refill_plan(problem_instance, route, n_trips, lo, hi, can_refill = None, detours = None):
@@ -214,7 +249,7 @@ def fastest_refill_plan(problem_instance, route, n_trips, lo, hi, can_refill = N
     result = {"feasible": False, "finish": None, "refills": [], "blocked": None}
     node = route[0]
     arrival = problem_instance.depot.start_interval + t[0][node.index] + detours[0][0] + transfer
-    if arrival > node.end_interval:
+    if arrival > node.end_interval + TIME_EPS:
         result["blocked"] = (0, arrival - node.end_interval)
         return result
     labels = {(1, 0): (max(arrival, node.start_interval) + node.unloading_time, (0,))}
@@ -228,14 +263,14 @@ def fastest_refill_plan(problem_instance, route, n_trips, lo, hi, can_refill = N
             if not must_cut_before and prefix[pos + 1] - prefix[start] <= capacity:
                 arrival = finish + drive
                 best_arrival = min(best_arrival, arrival)
-                if arrival <= node.end_interval:
+                if arrival <= node.end_interval + TIME_EPS:
                     label = (max(arrival, node.start_interval) + node.unloading_time, refills)
                     if (started, start) not in new_labels or label[0] < new_labels[(started, start)][0]:
                         new_labels[(started, start)] = label
             if started < n_trips and lo[started] <= pos <= hi[started] and can_refill[pos]:
                 arrival = finish + drive + detours[pos][0] + transfer
                 best_arrival = min(best_arrival, arrival)
-                if arrival <= node.end_interval:
+                if arrival <= node.end_interval + TIME_EPS:
                     label = (max(arrival, node.start_interval) + node.unloading_time, refills + (pos,))
                     if (started + 1, pos) not in new_labels or label[0] < new_labels[(started + 1, pos)][0]:
                         new_labels[(started + 1, pos)] = label
@@ -323,7 +358,7 @@ def bounded_transshipment_checking(problem_instance, route, extra_trips = None):
         finish = problem_instance.depot.start_interval + detours[0][0] + transfer
         for pos, node in enumerate(route):
             arrival = finish + t[previous[pos]][node.index]
-            if arrival > node.end_interval:
+            if arrival > node.end_interval + TIME_EPS:
                 result["blocked"] = (pos, node.index, arrival - node.end_interval)
                 break
             finish = max(arrival, node.start_interval) + node.unloading_time
@@ -402,14 +437,14 @@ def bounded_transshipment_checking(problem_instance, route, extra_trips = None):
                     must_cut_before = started < n_trips and pos > hi[started]
                     if not must_cut_before and prefix[pos + 1] - prefix[start] <= capacity:
                         arrival = finish + drive
-                        if arrival <= node.end_interval:
+                        if arrival <= node.end_interval + TIME_EPS:
                             add_label(new_labels, (started, start),
                                       (max(arrival, node.start_interval) + node.unloading_time, cost, refills))
                     #refill before this customer: start trip number `started`
                     if started < n_trips and lo[started] <= pos <= hi[started] and can_refill[pos]:
                         detour, _ = detours[pos]
                         arrival = finish + drive + detour + transfer
-                        if arrival <= node.end_interval:
+                        if arrival <= node.end_interval + TIME_EPS:
                             add_label(new_labels, (started + 1, pos),
                                       (max(arrival, node.start_interval) + node.unloading_time,
                                        cost + unit*detour, refills + (pos,)))
@@ -429,7 +464,7 @@ def bounded_transshipment_checking(problem_instance, route, extra_trips = None):
                       satellites={route[pos].index: detours[pos][1] for pos in refills})
     return result
 
-def two_pass_transshipment_checking(problem_instance, route, extra_trips = None):
+def two_pass_transshipment_checking(problem_instance, route, extra_trips = None, min_trips_first = False):
     """
     Optimal refill (transfer) plan of a fixed street route in two passes; same rules, arguments
     and returned dict as bounded_transshipment_checking (the street MIP for one route).
@@ -453,6 +488,7 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None)
     vehicle + distance + det[0] + K * trip_unit_cost is below the incumbent: with
     trip_unit_cost >= the detour cost of the K* plan this stops after K*.
     Cost: every trip counts one trip_unit_cost (the first load included), as the street MIP.
+    min_trips_first: pass 2 only for K = K* (two_way_transshipment_checking).
     """
     result = {"feasible": False, "refills": [], "satellites": {}, "cost": BigNumber, "transfer_cost": BigNumber,
               "n_trips": 0, "min_trips": 0, "finish": None, "labels": 0, "attempts": {}, "blocked": None}
@@ -468,7 +504,7 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None)
     unit = problem_instance.cost_unit_travel
     trip_cost = problem_instance.trip_unit_cost
     transfer = problem_instance.TransferDuration
-    eps = 1e-9
+    eps = TIME_EPS
 
     previous = [0] + [node.index for node in route[:-1]]
     drive = [t[previous[pos]][node.index] for pos, node in enumerate(route)]
@@ -599,6 +635,8 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None)
     first_cost = unit*det[0]
     best = None #(n_trips, total, finish, label)
     for K in range(k_star, max_trips + 1):
+        if best is not None and min_trips_first:
+            break #lexicographic: the plan with the minimum number of transshipments K* is kept
         if best is not None and fixed_cost + first_cost + K*trip_cost >= best[1] - eps:
             result["attempts"][K] = "lower bound >= incumbent"
             break
@@ -660,7 +698,7 @@ def check_route_transshipments(problem_instance, route):
     when the tabu search is active (as the MIP does).
     """
     if ROUTE_CHECK == "mip":
-        return check_route_transshipments(problem_instance, route)
+        return MathModels.street_problem_MIP(problem_instance, problem_instance.timelimit_SEmodel, route)
     if len(route) == 0:
         return True, 0, [], route
     result = optimal_transshipment_checking(problem_instance, route)
@@ -1088,11 +1126,18 @@ def is_route_feasible(problem_instance, route):
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[route[-1].index][0] 
     vrp_cost += problem_instance.cost_unit_travel*problem_instance.distance_matrix[0][route[0].index] #return to depot and departure from depot
 
-    if REFILL_RULE in ("optimal", "optimal_cost"):
-        #refill points chosen by the DP: minimum transshipments ("optimal") or the bounded DP
-        #("optimal_cost": minimum first, more when needed or cheaper; the street MIP's plan)
-        optimal = (bothway_optimal_checking(problem_instance, route) if REFILL_RULE == "optimal"
-                   else optimal_transshipment_checking(problem_instance, route))
+    if REFILL_RULE in ("two_way", "optimal", "optimal_cost"):
+        #refill points chosen by the DP:
+        #  "two_way":      minimum number of transshipments that is on time (K* >= m), then the
+        #                  cheapest plan with K* (two_way_transshipment_checking)
+        #  "optimal":      exactly the capacity minimum m (rejects routes that need m+1)
+        #  "optimal_cost": cheapest plan with any number >= m (the street MIP's plan)
+        if REFILL_RULE == "two_way":
+            optimal = two_way_transshipment_checking(problem_instance, route)
+        elif REFILL_RULE == "optimal":
+            optimal = bothway_optimal_checking(problem_instance, route)
+        else:
+            optimal = optimal_transshipment_checking(problem_instance, route)
         if not optimal["feasible"]:
             return False, route, BigNumber
         #the street MIP has no constraint on the return to the garage, so the finish time of the

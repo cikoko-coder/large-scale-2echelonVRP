@@ -358,3 +358,65 @@ def test_two_pass_equals_bounded_dp():
                 assert a["cost"] == pytest.approx(b["cost"], abs=1e-6)
                 assert a["min_trips"] == b["min_trips"]
                 assert max(trip_loads(route, a["refills"])) <= problem.capacity_SEV
+
+
+# ---- two-way rule: minimum number of transshipments on time, then the cheapest plan ---- #
+def check_two_way_against_brute_force(problem, route):
+    """two_way = smallest feasible number of refills K* (>= m), cheapest plan with K*; returns K* - m."""
+    res = RH.two_way_transshipment_checking(problem, route)
+    n, m = len(route), len(RH.forward_checking(problem, route))
+    k_star = next((K for K in range(m, n + 1) if brute_force(problem, route, n_refills=K) is not None), None)
+    assert res["feasible"] == (k_star is not None)
+    if k_star is None:
+        assert res["min_trips_on_time"] is None
+        return None
+    assert res["n_trips"] == res["min_trips_on_time"] == k_star == len(res["refills"])
+    assert res["transfer_cost"] == pytest.approx(brute_force(problem, route, n_refills=k_star), abs=1e-6)
+    assert max(trip_loads(route, res["refills"])) <= problem.capacity_SEV
+    cheapest = RH.two_pass_transshipment_checking(problem, route)
+    assert cheapest["transfer_cost"] <= res["transfer_cost"] + 1e-6 and cheapest["n_trips"] >= k_star
+    if problem.trip_unit_cost == 10000.0:  # a trip costs more than any detour saving here
+        assert cheapest["n_trips"] == k_star
+    return k_star - m
+
+
+def test_two_way_is_lexicographic_minimum_transshipments_then_cost():
+    """two_way_transshipment_checking against brute force on random routes, any trip cost."""
+    rng = random.Random(23)
+    feasible = 0
+    for _ in range(600):
+        problem, route = (tight_instance if rng.random() < 0.5 else random_instance)(rng, rng.randint(1, 10))
+        problem.trip_unit_cost = rng.choice([0.0, 1.0, 30.0, 10000.0])
+        feasible += check_two_way_against_brute_force(problem, route) is not None
+    assert feasible > 200
+
+
+def test_two_way_minimum_beyond_the_capacity_minimum():
+    """Routes where every m-trip split is late: two_way returns the brute-force K* > m."""
+    rng = random.Random(9)
+    hits = 0
+    while hits < 60:
+        problem, route = tight_instance(rng, rng.randint(3, 10))
+        m = len(RH.forward_checking(problem, route))
+        if brute_force(problem, route, n_refills=m) is not None:
+            continue
+        extra = check_two_way_against_brute_force(problem, route)
+        if extra is not None:
+            assert extra > 0
+            hits += 1
+
+
+def test_two_way_accepts_an_arrival_at_the_window_end_up_to_rounding():
+    """An arrival 1e-13 after the window end (float sums) is on time for every engine."""
+    route = route_of([1, 1])
+    for node, (a, b) in zip(route, [(0.0, 10.0), (0.0, 0.3)]):
+        node.start_interval, node.end_interval, node.unloading_time = a, b, 0.0
+    t = [[0.0] * 4 for _ in range(4)]
+    t[0][1] = t[1][0] = 0.1
+    t[1][2] = t[2][1] = 0.2  # arrival at customer 2: 0.1 + 0.2 = 0.30000000000000004 > 0.3
+    problem = NS(capacity_SEV=5, travel_matrix=t, satellites=[NS(index=3)], depot=NS(start_interval=0.0),
+                 cost_unit_travel=1.0, trip_unit_cost=0.0, cost_vehicle_use=0.0, TransferDuration=0.0)
+    assert 0.1 + 0.2 > route[1].end_interval
+    for check in (RH.two_way_transshipment_checking, RH.two_pass_transshipment_checking,
+                  RH.bounded_transshipment_checking):
+        assert check(problem, route)["feasible"], check.__name__
