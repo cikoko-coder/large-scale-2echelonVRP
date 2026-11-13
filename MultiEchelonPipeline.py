@@ -426,6 +426,10 @@ def run_initial_construction(instance_name: str, reports: dict):
         emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {MIP_STATUS.get(mip_result['status'], mip_result['status'])}, "
              f"objective {round(mip_result['objective'], 1) if mip_result['feasible'] else '-'}, gap {round(mip_result['gap'], 4) if mip_result['feasible'] else '-'}")
         if mip_result["feasible"]:
+            levels = mip_result.get("objective_levels", [])
+            if len(levels) == 3:
+                emit(f"  hierarchical objective: fleet {round(levels[0])}, transshipments {round(levels[1])}, "
+                     f"distance + detours {round(levels[2], 1)} (objective above = paper cost of this solution)")
             emit(f"  objective parts: vehicles {mip_result['fixed_vehicle_cost']}, distance {round(mip_result['distance_travel_cost'], 1)}, "
                  f"detours {round(mip_result['lead_time_cost'], 1)}, transshipments {mip_result['transshipment_cost']} ({len(mip_result['visits'])})")
             tw = mip_result["two_way_mip_routes"]
