@@ -38,7 +38,7 @@ UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bo
 COST_SETTING = "paper"     # "paper": costs of Karademir et al. (EJOR 2025) Sec. 5.1 with the ratio WLS; "code": 10000 constants
 WLS = 0.1                  # water level significance alpha (WLS 1:10 -> 0.1): c^w = alpha c^s, beta^w = alpha beta
 ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
-REFILL_RULE = "optimal_cost"  # route check rule: "optimal_cost" (bounded DP) or "optimal" (exactly the minimum)
+REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
 REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
 # initial solution: "heuristic" (multi-start insertion), "mip" (free street routing MIP over all
