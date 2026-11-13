@@ -1584,9 +1584,6 @@ def check_found_solutions(problem_instance):
         if solution_two_echelon.is_feasible:
             obj, routes, solution_two_echelon = solution_two_echelon.objective, solution_two_echelon.routes_sevs, solution_two_echelon
     
-            if obj > problem_instance.cutoff - 1:
-                solution_two_echelon.checked_optimality = True
-                continue
             if problem_instance.minVessel_bound == best_FEV_number and len(routes) > best_SEV_feasible:
                 solution_two_echelon.checked_optimality = True
                 continue
@@ -1700,11 +1697,10 @@ def check_2EVRP_solution_consolidated(problem_instance, solution_mvrp):
 
     if not solution_two_echelon.is_feasible:
         return solution_mvrp
-    else:    
-        if solution_two_echelon.objective > solution_mvrp.objective-0.1:    
-            return solution_mvrp
-        else:
-            return solution_two_echelon
+    #accepted only when better by the hierarchical objective
+    if is_better_solution(problem_instance, solution_two_echelon, solution_mvrp):
+        return solution_two_echelon
+    return solution_mvrp
 
 def check_MVRP_solution(problem_instance, routes):
     final_solution = sev.two_echelon_solution() #for single routes, no need to generate vehicles every time
@@ -1886,31 +1882,36 @@ def check_2EVRP_solution(problem_instance, multi_trip_solution, remove_satellite
 
     final_solution.nVisited_locations = len(list_locs) - 1
     
-    #update incumbent
-    
-    if problem_instance.cutoff > final_solution.objective + 0.0001:
-        problem_instance.cutoff = final_solution.objective
-        updated = False
-        if problem_instance.best_found is None:
-            problem_instance.best_found = final_solution
-        else:
-            if final_solution.nFEVs <= problem_instance.best_found.nFEVs:
-                 if final_solution.nFEVs < problem_instance.best_found.nFEVs:
-                     updated = True
-                 elif final_solution.nSEVs < problem_instance.best_found.nSEVs:
-                     updated = True
-                 elif final_solution.nSEVs == problem_instance.best_found.nSEVs and final_solution.nFEVs == problem_instance.best_found.nFEVs:
-                     if final_solution.travelTotal < problem_instance.best_found.travelTotal :
-                         updated = True
-                 if updated:
-                    problem_instance.best_found = final_solution
-        if problem_instance.best_found is final_solution and INCUMBENT_ROUTE_MIP:
+    #update incumbent: hierarchical objective (hierarchical_key: FEVs, SEVs, total distance)
+    if problem_instance.best_found is None or is_better_solution(problem_instance, final_solution, problem_instance.best_found):
+        problem_instance.best_found = final_solution
+        problem_instance.cutoff = final_solution.objective   #paper cost of the incumbent (reporting)
+        problem_instance.fe_fleet_bound = final_solution.nFEVs #no candidate with more FEVs can be better
+        if INCUMBENT_ROUTE_MIP:
             refine_incumbent_by_route_mip(problem_instance, final_solution)
 
     return final_solution
 
+def solution_distance(problem_instance, solution):
+    """Total distance of a two-echelon solution: street (c^s (distance + detours), the trip charge
+    removed) + water (c^w distance)."""
+    return solution.travelStreet - problem_instance.trip_unit_cost*len(solution.transshipments) + solution.travelWater
+
+def hierarchical_key(problem_instance, solution):
+    """The hierarchical objective of a two-echelon solution (Grangier et al. 2016): number of FEVs,
+    then number of SEVs, then total distance (solution_distance). Smaller is better."""
+    return (int(round(solution.nFEVs)), int(solution.nSEVs), solution_distance(problem_instance, solution))
+
+def is_better_solution(problem_instance, a, b, eps = 1e-4):
+    """True when a is strictly better than b by the hierarchical objective."""
+    ka, kb = hierarchical_key(problem_instance, a), hierarchical_key(problem_instance, b)
+    if ka[:2] != kb[:2]:
+        return ka[:2] < kb[:2]
+    return ka[2] < kb[2] - eps
+
 #on every incumbent update of the FE solver, re-solve the incumbent's SE routes by the fixed-route
-#street MILP (cheapest plan, any number of transshipments) and keep it if the 2E objective improves
+#street MILP (cheapest plan, any number of transshipments) and keep it if it is better by the
+#hierarchical objective (hierarchical_key)
 INCUMBENT_ROUTE_MIP = True
 
 def refine_incumbent_by_route_mip(problem_instance, incumbent):
@@ -1918,8 +1919,8 @@ def refine_incumbent_by_route_mip(problem_instance, incumbent):
     Incumbent update of the FE solver: the SE routes of the new incumbent are solved again by the
     fixed-route street MILP (route_mip_check: minimum SE cost, no minimum-transshipment bound, so a
     cheaper plan with more transshipments is allowed), then the multi-trip solution and the FE MILP
-    (its cutoff is the incumbent objective, so only a better two-echelon solution passes and becomes
-    problem.best_found). A record (objective, trips before and after) goes to
+    (fleet bound: the incumbent's FEVs); the result becomes problem.best_found when it is better by
+    the hierarchical objective (is_better_solution). A record (objective, trips before and after) goes to
     problem.incumbent_refinements. :return: problem.best_found
     """
     global ROUTE_CHECK

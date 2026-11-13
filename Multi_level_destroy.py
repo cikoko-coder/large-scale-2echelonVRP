@@ -365,7 +365,8 @@ def Optimize_FE(problem_instance, max_candidates = None, route_check = "dp"):
     keeps the two-way plans of the search (minimum transshipments, then TWO_WAY_OBJECTIVE); "mip"
     re-optimizes every route by the fixed-route street MILP (SolveFixedSEVRouteMILP, memoized), which
     places the transshipments at minimum SE cost without the minimum-transshipment bound. Then the multi-trip / MVRP check, the FE routing MILP (FEVmodels.water_problem_MIP)
-    and the satellite-removal consolidation, repeated while it improves.
+    and the satellite-removal consolidation, repeated while it improves. Incumbents are compared by
+    the hierarchical objective (RH.hierarchical_key: FEVs, SEVs, total distance).
     :return: (problem.best_found, number of SE solutions sent to the FE level)
     """
     ranked = []
@@ -381,6 +382,8 @@ def Optimize_FE(problem_instance, max_candidates = None, route_check = "dp"):
     if max_candidates is not None:
         ranked = ranked[:max_candidates]
     problem_instance.heuristics_solutions = [sequences for _, sequences in ranked]
+    incumbent = problem_instance.best_found
+    problem_instance.fe_fleet_bound = incumbent.nFEVs if incumbent is not None else math.inf
     before = RH.ROUTE_CHECK
     RH.ROUTE_CHECK = route_check
     try:

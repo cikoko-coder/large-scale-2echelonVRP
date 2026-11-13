@@ -175,3 +175,20 @@ def test_incumbent_is_rechecked_by_the_fixed_route_milp(start, monkeypatch):
     # the re-check never makes the incumbent worse and leaves the route check as it was
     assert best.objective <= rec["objective"] + 1e-6
     assert RH.ROUTE_CHECK == "dp" and not getattr(p, "_refining_incumbent", False)
+
+
+def test_incumbent_follows_the_hierarchical_objective(start):
+    """FEVs, then SEVs, then total distance (trip charge excluded): a weighted-sum loss does not
+    matter when a higher level wins."""
+    p, _ = start
+    import types
+    def sol(fevs, sevs, street, water, trips):
+        return types.SimpleNamespace(nFEVs=float(fevs), nSEVs=sevs, travelStreet=street + p.trip_unit_cost*trips,
+                                     travelWater=water, transshipments=[None]*trips)
+    base = sol(2, 3, 900.0, 500.0, 12)
+    assert RH.hierarchical_key(p, base) == (2, 3, 1400.0)
+    assert RH.is_better_solution(p, sol(1, 4, 2000.0, 900.0, 20), base)     # fewer FEVs wins
+    assert RH.is_better_solution(p, sol(2, 2, 1500.0, 600.0, 18), base)     # same FEVs, fewer SEVs
+    assert RH.is_better_solution(p, sol(2, 3, 850.0, 500.0, 15), base)      # more trips, less distance
+    assert not RH.is_better_solution(p, sol(2, 3, 900.0, 500.0, 10), base)  # equal distance: not better
+    assert not RH.is_better_solution(p, sol(3, 2, 100.0, 100.0, 5), base)
