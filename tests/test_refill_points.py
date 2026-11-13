@@ -300,3 +300,61 @@ def test_route_check_wrapper_has_the_mip_interface():
         else:
             assert visits == [] and route_back == [] and problem.tabu_list == [[x.index for x in route]]
     assert RH.check_route_transshipments(problem, []) == (True, 0, [], [])
+
+
+# ---- two-pass engine: pass 1 minimum trips K*, pass 2 cheapest plan with K* (and more) ---- #
+def tight_instance(rng, n):
+    """Windows tight around the travel-time schedule, two satellites: often K* > m."""
+    pts = [(rng.uniform(0, 50), rng.uniform(0, 50)) for _ in range(n + 3)]
+    t = [[math.dist(a, b) for b in pts] for a in pts]
+    q = rng.randint(4, 8)
+    customers, clock = [], t[0][1] + rng.uniform(0, 10)
+    for i in range(1, n + 1):
+        if i > 1:
+            clock += t[i - 1][i] + 2.0
+        w = rng.uniform(3, 40)
+        customers.append(NS(index=i, demand=rng.randint(1, q), start_interval=clock - w, end_interval=clock + w,
+                            unloading_time=2.0))
+    problem = NS(capacity_SEV=q, travel_matrix=t, satellites=[NS(index=n + 1 + k) for k in range(2)],
+                 depot=NS(start_interval=-100.0), cost_unit_travel=1.0, trip_unit_cost=rng.choice([0.0, 2.0, 10000.0]),
+                 cost_vehicle_use=0.0, TransferDuration=rng.choice([0.0, 1.0]))
+    return problem, customers
+
+
+def test_two_pass_minimum_trips_when_the_minimum_split_is_late():
+    """Routes where m trips are late: pass 1 gives the brute-force minimum K*, pass 2 its cost."""
+    rng = random.Random(9)
+    hits = 0
+    while hits < 60:
+        n = rng.randint(3, 10)
+        problem, route = tight_instance(rng, n)
+        m = len(RH.forward_checking(problem, route))
+        if brute_force(problem, route, n_refills=m) is not None:
+            continue
+        res = RH.two_pass_transshipment_checking(problem, route)
+        bf = brute_force(problem, route)
+        assert res["feasible"] == (bf is not None)
+        if bf is None:
+            continue
+        hits += 1
+        k_star = next(K for K in range(m, n + 1) if brute_force(problem, route, n_refills=K) is not None)
+        assert min(k for k, v in res["attempts"].items() if v == "feasible") == k_star
+        assert res["n_trips"] >= k_star and res["transfer_cost"] == pytest.approx(bf, abs=1e-6)
+        assert not RH.two_pass_transshipment_checking(problem, route, extra_trips=0)["feasible"]
+
+
+def test_two_pass_equals_bounded_dp():
+    """Same feasibility and cost as the bounded engine, also with extra_trips limits and long routes."""
+    rng = random.Random(31)
+    for _ in range(300):
+        n = rng.randint(1, 40)
+        problem, route = (tight_instance if rng.random() < 0.5 else random_instance)(rng, n)
+        problem.trip_unit_cost = rng.choice([0.0, 1.0, 30.0, 10000.0])
+        for extra in (None, 0, 1):
+            a = RH.two_pass_transshipment_checking(problem, route, extra)
+            b = RH.bounded_transshipment_checking(problem, route, extra)
+            assert a["feasible"] == b["feasible"]
+            if a["feasible"]:
+                assert a["cost"] == pytest.approx(b["cost"], abs=1e-6)
+                assert a["min_trips"] == b["min_trips"]
+                assert max(trip_loads(route, a["refills"])) <= problem.capacity_SEV
