@@ -80,13 +80,20 @@ def random_instance(rng, n):
 
 
 def brute_force(problem, route, n_refills=None):
-    """Every set of refill positions (position 0 always refills); n_refills fixes their number."""
+    """Every set of refill positions (position 0 always refills); n_refills fixes their number.
+    :return: the cheapest transfer cost or None"""
+    plans = brute_force_plans(problem, route, n_refills)
+    return min(cost for cost, _ in plans) if plans else None
+
+
+def brute_force_plans(problem, route, n_refills=None):
+    """(transfer cost, end of the last service) of every feasible refill plan."""
     import itertools
     t, n = problem.travel_matrix, len(route)
     prev = [0] + [node.index for node in route[:-1]]
     detour = [max(0.0, min(t[prev[k]][p.index] + t[p.index][route[k].index] - t[prev[k]][route[k].index]
                            for p in problem.satellites)) for k in range(n)]
-    best = None
+    plans = []
     for mask in itertools.product([0, 1], repeat=n - 1):
         cuts = [0] + [k + 1 for k, b in enumerate(mask) if b]
         if n_refills is not None and len(cuts) != n_refills:
@@ -104,9 +111,9 @@ def brute_force(problem, route, n_refills=None):
                 ok = False
                 break
             clock = max(clock, node.start_interval) + node.unloading_time
-        if ok and (best is None or cost < best - 1e-9):
-            best = cost
-    return best
+        if ok:
+            plans.append((cost, clock))
+    return plans
 
 
 def test_cost_optimal_dp_matches_brute_force():
@@ -371,7 +378,14 @@ def check_two_way_against_brute_force(problem, route):
         assert res["min_trips_on_time"] is None
         return None
     assert res["n_trips"] == res["min_trips_on_time"] == k_star == len(res["refills"])
-    assert res["transfer_cost"] == pytest.approx(brute_force(problem, route, n_refills=k_star), abs=1e-6)
+    plans = brute_force_plans(problem, route, n_refills=k_star)
+    if RH.TWO_WAY_OBJECTIVE == "makespan":  # earliest end of the last service, then cheapest
+        earliest = min(finish for _, finish in plans)
+        assert res["finish"] == pytest.approx(earliest, abs=1e-6)
+        assert res["transfer_cost"] == pytest.approx(
+            min(cost for cost, finish in plans if finish <= earliest + 1e-9), abs=1e-6)
+    else:
+        assert res["transfer_cost"] == pytest.approx(min(cost for cost, _ in plans), abs=1e-6)
     assert max(trip_loads(route, res["refills"])) <= problem.capacity_SEV
     cheapest = RH.two_pass_transshipment_checking(problem, route)
     assert cheapest["transfer_cost"] <= res["transfer_cost"] + 1e-6 and cheapest["n_trips"] >= k_star
@@ -380,8 +394,11 @@ def check_two_way_against_brute_force(problem, route):
     return k_star - m
 
 
-def test_two_way_is_lexicographic_minimum_transshipments_then_cost():
-    """two_way_transshipment_checking against brute force on random routes, any trip cost."""
+@pytest.mark.parametrize("objective", ["makespan", "cost"])
+def test_two_way_is_lexicographic_minimum_transshipments_then_objective(objective, monkeypatch):
+    """two_way_transshipment_checking against brute force on random routes, any trip cost: K*,
+    then the earliest (makespan) or the cheapest (cost) plan with K*."""
+    monkeypatch.setattr(RH, "TWO_WAY_OBJECTIVE", objective)
     rng = random.Random(23)
     feasible = 0
     for _ in range(600):

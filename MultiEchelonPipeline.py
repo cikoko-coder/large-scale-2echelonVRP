@@ -50,6 +50,7 @@ OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
 ROUTE_CHECK = "dp"         # route-level exact check: "dp" (two-way refill DP) or "mip" (street MIP of the fixed route)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" or "optimal"
+TWO_WAY_OBJECTIVE = "makespan"  # plan of the two-way check among the K* plans: "makespan" (earliest return) or "cost"
 REPAIR_ALL_STARTS = True   # initialization: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---
@@ -215,6 +216,7 @@ def run_instance(instance_name: str, reports: dict):
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
+    RH.TWO_WAY_OBJECTIVE = TWO_WAY_OBJECTIVE
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
     MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     out = []
@@ -231,7 +233,7 @@ def run_instance(instance_name: str, reports: dict):
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
     emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
-         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}")
+         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}, two-way plan by {TWO_WAY_OBJECTIVE}")
     emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), "
          f"{'all' if FE_CANDIDATES is None else f'up to {FE_CANDIDATES}'} min-fleet SE solutions, "
          f"routes re-optimized by {'the fixed-route street MILP' if FE_ROUTE_CHECK == 'mip' else 'the two-way DP'}")

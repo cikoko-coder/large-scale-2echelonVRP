@@ -147,10 +147,15 @@ def bothway_optimal_checking(problem_instance, route):
     """
     return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
 
+#plan of the two-way check among the plans with the minimum number of transshipments K*:
+#  "makespan" -> earliest return to the garage (then cheapest), "cost" -> cheapest (then earliest)
+TWO_WAY_OBJECTIVE = "makespan"
+
 def two_way_transshipment_checking(problem_instance, route):
     """
-    Route feasibility with the MINIMUM number of transshipments that is on time, then the
-    cheapest plan with that number (lexicographic: transshipments first, then cost).
+    Route feasibility with the MINIMUM number of transshipments that is on time, then among the
+    plans with that number the one of TWO_WAY_OBJECTIVE: "makespan" = earliest return to the garage
+    (then cheapest), "cost" = cheapest (then earliest). Lexicographic: transshipments first.
 
     * m = number of trips of the greedy split (capacity only) is a lower bound. Every split into
       m trips has its k-th refill between the backward (earliest) and forward (latest) greedy
@@ -160,15 +165,17 @@ def two_way_transshipment_checking(problem_instance, route):
       state that matters for feasibility, and a state with fewer trips at the same position and an
       earlier or equal time dominates. K = m, m+1, ... in order, so the first K that reaches the end
       on time is the minimum. K* > m only when the time windows make every m-trip split late.
-    * Cheapest plan with exactly K* trips (pass 2: Pareto labels (time, cost) inside the windows);
-      the closest satellite of every refill position minimizes both the arrival and the detour cost.
+    * Plan with exactly K* trips (pass 2: Pareto labels (time, cost) inside the windows), the
+      earliest or the cheapest; the closest satellite of every refill position minimizes both the
+      arrival and the detour cost. The returned cost is the cost of the chosen plan.
 
     Unlike optimal_transshipment_checking, no plan with more than K* trips is considered, even
     when it would be cheaper (possible when trip_unit_cost is below the detour savings, e.g. the
     trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
     :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
     """
-    result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)
+    result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True,
+                                             objective = TWO_WAY_OBJECTIVE)
     returns_in_time(problem_instance, route, result)
     result["min_trips_on_time"] = result["n_trips"] if result["feasible"] else None
     return result
@@ -496,7 +503,8 @@ def bounded_transshipment_checking(problem_instance, route, extra_trips = None):
                       satellites={route[pos].index: detours[pos][1] for pos in refills})
     return result
 
-def two_pass_transshipment_checking(problem_instance, route, extra_trips = None, min_trips_first = False):
+def two_pass_transshipment_checking(problem_instance, route, extra_trips = None, min_trips_first = False,
+                                    objective = "cost"):
     """
     Optimal refill (transfer) plan of a fixed street route in two passes; same rules, arguments
     and returned dict as bounded_transshipment_checking (the street MIP for one route).
@@ -521,6 +529,9 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
     trip_unit_cost >= the detour cost of the K* plan this stops after K*.
     Cost: every trip counts one trip_unit_cost (the first load included), as the street MIP.
     min_trips_first: pass 2 only for K = K* (two_way_transshipment_checking).
+    objective: plan chosen among the K-trip plans of pass 2: "cost" = cheapest (then earliest),
+    "makespan" = earliest end of the last service, i.e. earliest return to the garage for the fixed
+    route (then cheapest). The labels are Pareto-optimal in (time, cost), so both are exact.
     """
     result = {"feasible": False, "refills": [], "satellites": {}, "cost": BigNumber, "transfer_cost": BigNumber,
               "n_trips": 0, "min_trips": 0, "finish": None, "labels": 0, "attempts": {}, "blocked": None}
@@ -684,7 +695,12 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
                     if last:
                         if reached:
                             finish = end_start + service[-1]
-                            if found is None or (cost, finish) < (found[0] - eps, found[1]):
+                            if objective == "makespan": #earliest end, ties (within eps) by cost
+                                better = (found is None or finish < found[1] - eps
+                                          or (finish <= found[1] + eps and cost < found[0] - eps))
+                            else:
+                                better = found is None or (cost, finish) < (found[0] - eps, found[1])
+                            if better:
                                 found = (cost, finish, label)
                         continue
                     for q, departure in steps:
