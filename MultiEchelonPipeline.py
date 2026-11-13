@@ -19,8 +19,9 @@ import local_search as LS
 #     every k: ALNS (MLD destroy + the single repair RH.k_best_insertion_repair, N_ALNS iterations)
 #            from R*, local search on the best ALNS solution (N_LS * k: intensification grows with k),
 #            tabu list update + repair of the found schedules; R* = fewest SEVs, then two-way cost
-#   FE optimization (Multi_level_destroy.Optimize_FE): the min-fleet SE solutions (at most
-#     FE_CANDIDATES) -> FE routing MILP + satellite-removal consolidation (check_found_solutions)
+#   FE optimization (Multi_level_destroy.Optimize_FE): all min-fleet SE solutions found (more SEVs
+#     discarded) -> every route re-optimized by the fixed-route street MILP (FE_ROUTE_CHECK) -> FE
+#     routing MILP + satellite-removal consolidation (check_found_solutions)
 #   report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
 
 # --- CONFIGURATION ---
@@ -38,7 +39,9 @@ R_LS = 5                   # maximum repetitions of the local search
 N_LS = 500                 # local search iterations (times the ITS iteration k)
 N_ALNS = 500               # ALNS iterations per ITS iteration
 SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
-FE_CANDIDATES = 10         # min-fleet SE solutions sent to the FE MILP (None: all of them)
+FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
+FE_ROUTE_CHECK = "mip"     # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
+#                            no minimum-transshipment bound), "dp" = the two-way DP of the search
 
 RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)
 LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
@@ -229,7 +232,9 @@ def run_instance(instance_name: str, reports: dict):
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
     emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
          f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}")
-    emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), up to {FE_CANDIDATES} min-fleet SE solutions")
+    emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), "
+         f"{'all' if FE_CANDIDATES is None else f'up to {FE_CANDIDATES}'} min-fleet SE solutions, "
+         f"routes re-optimized by {'the fixed-route street MILP' if FE_ROUTE_CHECK == 'mip' else 'the two-way DP'}")
     removed = instanceGenerator.check_feasibility_all_nodes(problem)
     emit(f"customers infeasible on their own: {removed if removed else 'none'}")
 
@@ -269,12 +274,12 @@ def run_instance(instance_name: str, reports: dict):
     n_mip = len(mip_log) if mip_log is not None else 0
     t = time.time()
     stored = len(problem.heuristics_solutions)
-    final, n_candidates = MLD.Optimize_FE(problem, FE_CANDIDATES)
+    final, n_candidates = MLD.Optimize_FE(problem, FE_CANDIDATES, FE_ROUTE_CHECK)
     row["time_fe"] = round(time.time() - t, 2)
     row["fe_candidates"] = n_candidates
     emit("")
-    emit(f"--- FE optimization: {n_candidates} min-fleet SE solutions of {stored} stored -> FE MILP + "
-         f"satellite-removal consolidation: {row['time_fe']:.2f}s")
+    emit(f"--- FE optimization: {n_candidates} min-fleet SE solutions of {stored} stored (more SEVs discarded) -> "
+         f"route check {FE_ROUTE_CHECK} -> FE MILP + satellite-removal consolidation: {row['time_fe']:.2f}s")
     emit(f"  two-echelon feasible {len(problem.feas_solutions)}, not feasible or cut off by the incumbent "
          f"objective {len(problem.inf_solutions)}")
     if mip_log is not None:

@@ -282,7 +282,6 @@ class instance:
         self.inf_solutions = [] 
         self.checked_solutions = [] 
         self.tabu_list = []   
-        self.feasible_list = []
         self.earliest_times_feasible = []
         self.latest_times_feasible  = []
         self.best_found = None 

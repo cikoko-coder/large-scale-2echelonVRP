@@ -20,6 +20,7 @@ def start():
     with contextlib.redirect_stdout(io.StringIO()):
         p = instanceGenerator.readGenerate_benchmark("c208.txt", 100, unbounded_vehicle_time=True)
     p.tabu_search_active = False
+    p.synch_check = True
     p.modelStartTime = time.time()
     p.points_found = []
     p.min_relaxed_transfer_num = 0
@@ -107,3 +108,52 @@ def test_alns_never_returns_a_worse_schedule(start):
     assert report["iterations"] == 20
     assert sum(report["used"]["removal"].values()) == 20
     assert report["temperature"] == pytest.approx(MLD.SA_ACCEPTANCE*MLD.travel_cost(p, RH.two_way_solution_cost(p, routes)))
+
+
+def test_found_solutions_are_stored_once(start):
+    p, routes = start
+    p.heuristics_solutions = []
+    assert RH.add_to_feasible_solution(p, routes)
+    assert not RH.add_to_feasible_solution(p, list(reversed(routes)))      # same set, other route order
+    swapped = [list(r) for r in routes]
+    swapped[0][0], swapped[0][1] = swapped[0][1], swapped[0][0]
+    assert RH.add_to_feasible_solution(p, swapped)                         # other customer order is new
+    assert not RH.add_to_feasible_solution(p, routes[:-1])                 # partial: not stored
+    assert len(p.heuristics_solutions) == 2
+    first = p.heuristics_solutions[0]
+    p.heuristics_solutions = [first]                                       # list replaced elsewhere
+    assert not RH.add_to_feasible_solution(p, routes)
+    assert RH.add_to_feasible_solution(p, swapped) and len(p.heuristics_solutions) == 2
+
+
+def test_route_mip_check_is_memoized(start, monkeypatch):
+    import MathModels
+    p, routes = start
+    p._route_mip_cache = {}
+    calls = []
+    original = MathModels.street_problem_MIP
+    monkeypatch.setattr(MathModels, "street_problem_MIP", lambda *a, **k: calls.append(1) or original(*a, **k))
+    route = routes[0]
+    first = RH.route_mip_check(p, route)
+    first[2][0].append(999)                                                # callers append loads to visits
+    second = RH.route_mip_check(p, route)
+    assert len(calls) == 1 and first[0] and second[0]
+    assert first[1] == second[1] and all(len(v) == 2 for v in second[2])
+    two_way = RH.two_way_transshipment_checking(p, route)
+    assert second[1] <= two_way["cost"] - p.cost_vehicle_use + 1e-3        # MILP: min cost, any number of trips
+
+
+def test_optimize_fe_takes_only_the_fewest_sevs(start):
+    p, routes = start
+    random.seed(5)
+    p.heuristics_solutions, p.checked_solutions, p.feas_solutions, p.inf_solutions = [], [], [], []
+    p.best_found, p.cutoff = None, float("inf")
+    RH.add_to_feasible_solution(p, routes)
+    split = [list(r) for r in routes]
+    split.append([split[0].pop()])                                         # one SEV more
+    RH.add_to_feasible_solution(p, split)
+    with contextlib.redirect_stdout(io.StringIO()):
+        best, n = MLD.Optimize_FE(p)
+    assert n == 1 and len(p.checked_solutions) == 1 and len(p.checked_solutions[0]) == len(routes)
+    assert best is not None and best.is_feasible and best.nSEVs == len(routes)
+    assert RH.ROUTE_CHECK == "dp"                                          # restored after the FE stage
