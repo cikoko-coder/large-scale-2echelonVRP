@@ -32,11 +32,10 @@ INSTANCES_TO_RUN = ["c201.txt", "c208.txt", "r201.txt", "r208.txt", "rc201.txt",
 #   "full"    -> the complete iterative method (run_instance)
 STAGE = "initial"
 RANDOM_SEED = 32           # same seed rule as Solve_by_decomposition: seed + its_iter
-LOG_MIP_CALLS = True       # count every Gurobi solve (model name, status) during the run
+LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
+MIP_SOLVER = None          # None: environment variable MIP_SOLVER, else the free HiGHS solver; "highs", "gurobi" (second option) or "scipy"
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
-COST_SETTING = "paper"     # "paper": costs of Karademir et al. (EJOR 2025) Sec. 5.1 with the ratio WLS; "code": 10000 constants
-WLS = 0.1                  # water level significance alpha (WLS 1:10 -> 0.1): c^w = alpha c^s, beta^w = alpha beta
 ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
@@ -49,10 +48,11 @@ REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, no
 #                        two-echelon check and the initial solution is the one with the smaller
 #                        two-way cost (RH.two_way_solution_cost)
 #   "heuristic+mip"      the MIP warm-started with the best heuristic routes
-# The MIP needs a full Gurobi license for 100 customers (the pip size-limited license stops at
-# 2000 variables); if it fails the heuristic solution is used.
-INITIAL_METHOD = "heuristic+free_mip"
-MIP_INITIAL_TIMELIMIT = 600   # seconds for the free routing MIP
+# The MIPs run on the free HiGHS solver by default (no size limit: the free routing MIP runs on
+# all 100 customers). Gurobi is the second option (MIP_SOLVER = "gurobi"; needs a full license for
+# 100 customers, the pip license stops at 2000 variables). If the MIP fails the heuristic solution is used.
+INITIAL_METHOD = "heuristic+mip"   # MIP warm-started with the heuristic routes (free HiGHS, 100 customers)
+MIP_INITIAL_TIMELIMIT = 300   # seconds for the free routing MIP (5 min)
 MIP_INITIAL_CUSTOMERS = None  # None: all customers; an int n restricts the instance to the first n customers (testing)
 
 # --- HELPER FUNCTIONS ---
@@ -70,32 +70,40 @@ def create_report_file(prefix: str) -> str:
     return filename
 
 
-# Gurobi status codes that appear in the log (gurobipy.GRB.Status)
-GUROBI_STATUS = {1: "LOADED", 2: "OPTIMAL", 3: "INFEASIBLE", 4: "INF_OR_UNBD", 5: "UNBOUNDED",
-                 6: "CUTOFF", 9: "TIME_LIMIT", 11: "INTERRUPTED", 13: "SUBOPTIMAL"}
+# MIP status names in the log (twoe.solver: OPTIMAL, FEASIBLE = stopped with an incumbent,
+# INFEASIBLE, NO_SOLUTION = stopped without one, CUTOFF = proven worse than the cutoff)
+MIP_STATUS = {}
+
+
+def configure_mip_solver():
+    """Set the backend of every MIP of the run (MIP_SOLVER; None keeps the environment
+    variable MIP_SOLVER or the free HiGHS default). Returns the backend name."""
+    from twoe import solver as mip
+    mip.set_default_backend(MIP_SOLVER)
+    return mip.default_backend()
 
 
 def enable_mip_logging():
-    """Wrap gurobipy.Model.optimize to record every solve: (model name, status, vars, constrs, time).
+    """Record every MIP solve: (model name, status, vars, constrs, solutions found, time).
 
-    Returns the list that collects the records. Calling it twice does not wrap twice.
+    Returns the list that collects the records. Calling it twice does not register twice.
     """
-    import gurobipy
-    if getattr(gurobipy.Model.optimize, "_pipeline_log", None) is not None:
-        return gurobipy.Model.optimize._pipeline_log
+    from twoe import solver as mip
+    global _MIP_RECORDS
+    if _MIP_RECORDS is not None:
+        return _MIP_RECORDS
     records = []
-    original = gurobipy.Model.optimize
 
-    def optimize(self, *args, **kwargs):
-        t0 = time.time()
-        result = original(self, *args, **kwargs)
-        records.append((self.ModelName, self.Status, self.NumVars, self.NumConstrs,
-                        self.SolCount, time.time() - t0))
-        return result
+    def record(model):
+        st = model.stats
+        records.append((model.name, st.status, st.n_vars, st.n_constrs, int(model.has_solution), st.runtime))
 
-    optimize._pipeline_log = records
-    gurobipy.Model.optimize = optimize
+    mip.add_solve_listener(record)
+    _MIP_RECORDS = records
     return records
+
+
+_MIP_RECORDS = None
 
 
 def summarize_mip_calls(records, since=0):
@@ -109,7 +117,7 @@ def summarize_mip_calls(records, since=0):
         g[3] = max(g[3], ncons)
     lines = [f"MIP solves: {len(records) - since}"]
     for (name, status), (n, secs, nvars, ncons) in groups.items():
-        lines.append(f"  {name:<22} {GUROBI_STATUS.get(status, status):<11} solves={n:<4} "
+        lines.append(f"  {name:<22} {MIP_STATUS.get(status, status):<11} solves={n:<4} "
                      f"time={secs:7.2f}s  max vars={nvars} max constrs={ncons}")
     return "\n".join(lines)
 
@@ -198,6 +206,11 @@ def trace_route_check(problem, route):
         info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
     elif info["tabu"]:
         info["reason"] = "route contains a tabu sequence"
+    elif not bounded["feasible"] and not bounded["attempts"] and bounded.get("blocked"):
+        pos, customer, late = bounded["blocked"][:3]
+        info["reason"] = (f"the sequence itself misses a time window: even the fastest schedule (one loading "
+                          f"before the first customer, no refill afterwards) reaches customer {customer} "
+                          f"(position {pos}) {round(late, 1)} late, so no refill plan can be on time")
     elif not bounded["feasible"]:
         attempts = "; ".join(f"K={k}: {v}" for k, v in bounded["attempts"].items())
         info["reason"] = f"no refill plan is within capacity and on time ({attempts})"
@@ -303,8 +316,7 @@ def build_problem(instance_name: str, reports: dict):
     """Generate the instance and set the run parameters (shared by every stage)."""
     if BENCHMARK_MODE:
         problem = instanceGenerator.readGenerate_benchmark(instance_name, 100,
-                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME,
-                                                           cost_setting=COST_SETTING, wls=WLS)
+                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME)
     else:
         problem = instanceGenerator.read_generate_case(
             DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES,
@@ -335,6 +347,7 @@ def run_initial_construction(instance_name: str, reports: dict):
     """
     import random
 
+    backend = configure_mip_solver()
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
@@ -351,9 +364,10 @@ def run_initial_construction(instance_name: str, reports: dict):
     emit(f"customers {len(problem.customers)}, satellites {len(problem.satellites)}, "
          f"SEV capacity {problem.capacity_SEV}, FEV capacity {problem.capacity_FEV}, "
          f"synchronized {problem.synch_check}")
-    emit(f"costs ({getattr(problem, 'cost_setting', 'code')}): c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
+    emit(f"costs: c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
+    emit(f"MIP solver {backend}")
     emit(f"street MIP time limit {problem.timelimit_SEmodel}s, water MIP time limit {problem.timelimit_FEmodel}s, "
          f"min vessels bound {problem.minVessel_bound}")
     customer_windows = [(node.start_interval, node.end_interval) for node in problem.customers]
@@ -402,14 +416,14 @@ def run_initial_construction(instance_name: str, reports: dict):
         try:
             mip_solution, mip_result = MLD.mip_initial_solution(problem, MIP_INITIAL_TIMELIMIT, warm_start=warm,
                                                                 customers=problem.customers)
-        except Exception as error:  # e.g. the size-limited license
+        except Exception as error:  # e.g. the size-limited Gurobi license
             mip_solution, mip_result = None, {"feasible": False, "status": f"error: {error}", "n_vars": "?", "n_constrs": "?",
                                               "time": time.time() - t1, "objective": math.inf, "gap": math.inf}
         emit("")
         emit(f"--- step 1{'b' if construction is not None else ''}: free street routing MIP over {len(problem.customers)} customers"
              f"{' warm-started with the heuristic routes' if warm else ' (no routes passed, no warm start)'}, "
              f"time limit {MIP_INITIAL_TIMELIMIT}s: {mip_result['time']:.1f}s")
-        emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {GUROBI_STATUS.get(mip_result['status'], mip_result['status'])}, "
+        emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {MIP_STATUS.get(mip_result['status'], mip_result['status'])}, "
              f"objective {round(mip_result['objective'], 1) if mip_result['feasible'] else '-'}, gap {round(mip_result['gap'], 4) if mip_result['feasible'] else '-'}")
         if mip_result["feasible"]:
             emit(f"  objective parts: vehicles {mip_result['fixed_vehicle_cost']}, distance {round(mip_result['distance_travel_cost'], 1)}, "
@@ -474,6 +488,7 @@ def run_initial_construction(instance_name: str, reports: dict):
 
 def run_instance(instance_name: str, reports: dict):
     """Initializes and solves a single problem instance iteratively."""
+    configure_mip_solver()
     # 1. Problem Initialization (Assuming external module 'instanceGenerator')
     if BENCHMARK_MODE:
         problem = instanceGenerator.readGenerate_benchmark(instance_name, 100)

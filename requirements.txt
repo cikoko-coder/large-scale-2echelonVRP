@@ -1,0 +1,11 @@
+# MIP solver: the free HiGHS solver is the default (no problem-size limit)
+highspy>=1.7
+numpy
+scipy
+pandas
+openpyxl
+matplotlib
+pytest
+# optional second MIP solver (MIP_SOLVER=gurobi); the pip license is limited to 2000
+# variables/constraints, 100-customer models need a full license
+# gurobipy

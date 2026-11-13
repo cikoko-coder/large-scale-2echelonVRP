@@ -53,7 +53,7 @@ if __name__ == "__main__":
     
     for ds in range(nof_demand_scenario): 
         if benhmark_problem:
-            problem = instanceGenerator.readGenerate_benchmark(instances[ds],size=100)##instance, size, WLS, time limit for solver
+            problem = instanceGenerator.readGenerate_benchmark(instances[ds],size=100)##instance, size
         else:
             problem = instanceGenerator.read_generate_case(ds ,nof_horeca=1000, nof_satellites=n_satellites)#
         

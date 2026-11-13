@@ -2,15 +2,23 @@ import os
 import io
 import numpy
 import math 
-from gurobipy import *
-from gurobipy import GRB
 import time
-from gurobipy import quicksum
-from gurobipy import Model
-from gurobipy import LinExpr
+from twoe.solver import MILP, LinExpr, quicksum
 import Repair_heuristcs as RH
 
 bigNumber = 100000
+
+#The street MIPs are solved by the free HiGHS solver by default (no size limit, so the free
+#routing MIP runs on 100 customers); Gurobi is the second option. Choose the solver with
+#twoe.solver.set_default_backend("gurobi") or the environment variable MIP_SOLVER=gurobi.
+GUROBI_HEURISTICS = 0.75        #Gurobi "Heuristics" parameter (share of time in the MIP heuristics)
+HIGHS_HEURISTIC_EFFORT = 0.3    #HiGHS "mip_heuristic_effort" of the free routing MIP (default of HiGHS 0.05)
+
+def set_search_parameters(model, free_routing = False):
+    """Solver-specific search emphasis: more heuristics, as the original Gurobi setting."""
+    model.params["gurobi"]["Heuristics"] = GUROBI_HEURISTICS
+    if free_routing:
+        model.params["highs"]["mip_heuristic_effort"] = HIGHS_HEURISTIC_EFFORT
 MIP_GAP = 0.0001 #relative gap of the fixed-route model (solve_MIP); 0 gives the exact transshipment plan
 
 def get_routes(problem, arcs):
@@ -109,7 +117,7 @@ def add_assignment_constraints(problem, model, solution_in = None, customers = N
 
     #add assignment const
     xij = {} #street route
-    nofCars = model.addVar(lb=0,ub=len(model._customers), vtype=GRB.INTEGER, name = "nofCars")
+    nofCars = model.add_var(lb=0,ub=len(model._customers), vtype="I", name = "nofCars")
     arcList = []
     if solution_in:
         arcs_given = []
@@ -129,13 +137,13 @@ def add_assignment_constraints(problem, model, solution_in = None, customers = N
                 continue
             if solution_in and (i, j) not in arcs_given_set: 
                 continue
-            xij[i,j]=model.addVar (vtype=GRB.BINARY, name="x."+str(i)+"."+str(j))                
+            xij[i,j]=model.add_var(vtype="B", name="x."+str(i)+"."+str(j))                
             arcList.append([i,j])
             
             #given solution, provide bounds
             if solution_in:
                 xij[i,j].lb = 1
-    model.update()         
+
 
      #---Part 1----- Street level routing Problem Constraints 
     arc_set = set((i, j) for [i, j] in arcList)
@@ -146,14 +154,14 @@ def add_assignment_constraints(problem, model, solution_in = None, customers = N
         incoming[j].append(i)
     #assignment const
     for i in model._customers:
-        model.addConstr(quicksum(xij[i,j] for j in outgoing[i])==1, "outflow."+str(i)) #Const2
-        model.addConstr(quicksum(xij[j,i] for j in incoming[i])==1,"inflow."+str(i)) #Const2
+        model.add_constr(quicksum(xij[i,j] for j in outgoing[i])==1, "outflow."+str(i)) #Const2
+        model.add_constr(quicksum(xij[j,i] for j in incoming[i])==1,"inflow."+str(i)) #Const2
     
     #fleet size and  #flow balance at the depot (garage for street vehicles)
-    model.addConstr(quicksum(xij[i,0] for i in incoming[0]) == nofCars) #Const3
+    model.add_constr(quicksum(xij[i,0] for i in incoming[0]) == nofCars) #Const3
     leaving = [[i,j] for [i,j] in arcList if i==0] 
     returning = [[i,j] for [i,j] in arcList if j==0]
-    model.addConstr(quicksum(xij[i,j] for [i,j] in leaving ) - quicksum(xij[i,j] for [i,j] in returning) == 0) #Const3 
+    model.add_constr(quicksum(xij[i,j] for [i,j] in leaving ) - quicksum(xij[i,j] for [i,j] in returning) == 0) #Const3 
 
     model._arcList = arcList
     model._arc_set = arc_set
@@ -163,7 +171,7 @@ def add_assignment_constraints(problem, model, solution_in = None, customers = N
     model._xij = xij
     model._nofCars = nofCars
 
-    model.update()
+
     return
 
 #capcaity constraints change based on solution
@@ -178,9 +186,9 @@ def add_capacity_constraints_load(problem, model, solution_in = None, transfers_
     for i in Customers:
         for j in problem.satellites:
             if transfers_in and [i,j.index] not in transfers_in:
-                v[i,j.index] = model.addVar (lb=0, ub=0, vtype=GRB.CONTINUOUS, name="v"+str(i)+"."+str(j.index))
+                v[i,j.index] = model.add_var(lb=0, ub=0, vtype="C", name="v"+str(i)+"."+str(j.index))
                 continue
-            v[i,j.index] = model.addVar (vtype=GRB.BINARY, name="v"+str(i)+"."+str(j.index))       #transfer decision defined just before a customer 
+            v[i,j.index] = model.add_var(vtype="B", name="v"+str(i)+"."+str(j.index))       #transfer decision defined just before a customer 
             
     #if solution is given, then the assignments are the closest ones
     if solution_in: 
@@ -201,23 +209,23 @@ def add_capacity_constraints_load(problem, model, solution_in = None, transfers_
                         v[i,p.index].ub = 0
         
     for i in Customers:
-        m[i] = model.addVar(lb=0,ub=problem.capacity_SEV - problem.nodes[i].demand, vtype=GRB.CONTINUOUS, name="m"+str(i)) #load level at the departure at customer i
-    model.update()
+        m[i] = model.add_var(lb=0,ub=problem.capacity_SEV - problem.nodes[i].demand, vtype="C", name="m"+str(i)) #load level at the departure at customer i
+
 
     for [i, j] in arcList:
         if i != 0 and j != 0:
-            model.addConstr(m[i] >= m[j] + problem.nodes[j].demand - problem.capacity_SEV*(1 - xij[i,j] + quicksum(v[j,k.index] for k in problem.satellites)))
+            model.add_constr(m[i] >= m[j] + problem.nodes[j].demand - problem.capacity_SEV*(1 - xij[i,j] + quicksum(v[j,k.index] for k in problem.satellites)))
     
     leaving = model._outgoing[0]
     #first transshipment
     for i in leaving:
-        model.addConstr(quicksum(v[i,k.index] for k in problem.satellites) >= xij[0, i])
+        model.add_constr(quicksum(v[i,k.index] for k in problem.satellites) >= xij[0, i])
         
     for i in Customers:
-        model.addConstr(quicksum(v[i,k.index] for k in problem.satellites) <= 1)
+        model.add_constr(quicksum(v[i,k.index] for k in problem.satellites) <= 1)
     model._m = m
     model._v = v  
-    model.update()
+
     
     return 
 
@@ -238,60 +246,60 @@ def add_temporal_constraints(problem, model):
 
     incoming = model._incoming
     for i in Customers:
-        h[i] = model.addVar(lb=problem.nodes[i].start_interval,ub=problem.nodes[i].end_interval, vtype=GRB.CONTINUOUS, name="h"+str(i))
+        h[i] = model.add_var(lb=problem.nodes[i].start_interval,ub=problem.nodes[i].end_interval, vtype="C", name="h"+str(i))
         #add lead times, bounded by the largest detour over the arcs entering i
         max_lead = max([detour(k, p, i) for k in incoming[i] for p in problem.satellites] + [0])
-        lead_time[i] = model.addVar(lb=0,ub=max_lead, vtype=GRB.CONTINUOUS, name="lead_time"+str(i))
+        lead_time[i] = model.add_var(lb=0,ub=max_lead, vtype="C", name="lead_time"+str(i))
 
     #garage departure: free in time between the vehicle start and the horizon end
-    h[0] = model.addVar(lb=problem.nodes[0].start_interval,ub=problem.nodes[0].end_interval, vtype=GRB.CONTINUOUS, name="h"+str(0))    
-    model.update()
+    h[0] = model.add_var(lb=problem.nodes[0].start_interval,ub=problem.nodes[0].end_interval, vtype="C", name="h"+str(0))    
+
     #service start times flowing #Const8
     #big-M of arc (i,j) from the variable bounds: the constraint must be slack when x_ij = 0
     #M_ij = ub(h_i) + s_i + t_ij + transfer + ub(lead_j) - lb(h_j)  (customer windows, not the vehicle shift)
     vehicle_start = problem.nodes[0].start_interval
                 
     for j in Customers:
-        model.addConstr(h[j] >= vehicle_start + problem.travel_matrix[0][j] ) 
+        model.add_constr(h[j] >= vehicle_start + problem.travel_matrix[0][j] ) 
         for i in incoming[j]:
             #lead time of j = detour of the satellite chosen for the refill before j on the used arc (i,j)
             #(one constraint per arc: at most one v[j,p] is 1, and the detour bound makes it slack when x_ij = 0)
             max_detour = max(detour(i, p, j) for p in problem.satellites)
-            model.addConstr(lead_time[j] >= quicksum(v[j,p.index]*detour(i, p, j) for p in problem.satellites)
+            model.add_constr(lead_time[j] >= quicksum(v[j,p.index]*detour(i, p, j) for p in problem.satellites)
                             - max(0, max_detour)*(1 - xij[i,j]))
             bigNumberTime = max(0, h[i].ub + problem.nodes[i].unloading_time + problem.travel_matrix[i][j]
                                 + problem.TransferDuration + lead_time[j].ub - h[j].lb)
                     
-            model.addConstr(h[i] + problem.nodes[i].unloading_time  + problem.travel_matrix[i][j] #service ends
+            model.add_constr(h[i] + problem.nodes[i].unloading_time  + problem.travel_matrix[i][j] #service ends
                             + problem.TransferDuration*quicksum(v[j,p.index] for p in problem.satellites) + lead_time[j]  <= h[j] + bigNumberTime*(1 - xij[i,j])) #transfer ends
 
     model._h = h
     model._lead_time = lead_time
-    model.update()
+
     return 
 
 def add_objective(problem, model):
     # Define objective components
     
-    fixed_vehicle_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="fixed_vehicle_cost") #number of cars 
-    distance_travel_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="distance_travel_cost") 
-    lead_time_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="lead_time_cost")
-    model.update()
+    fixed_vehicle_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="fixed_vehicle_cost") #number of cars 
+    distance_travel_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="distance_travel_cost") 
+    lead_time_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="lead_time_cost")
 
-    model.addConstr(fixed_vehicle_cost>=model._nofCars*problem.cost_vehicle_use) #fixed 
-    model.addConstr(distance_travel_cost >= quicksum(model._xij[i,j]*problem.DistMatrix[i][j]*problem.cost_unit_travel for [i,j] in model._arcList)) #fixed
-    model.addConstr(lead_time_cost>=quicksum(model._lead_time[i]*problem.cost_unit_travel for i in model._customers)) #variable wrt customers
+
+    model.add_constr(fixed_vehicle_cost>=model._nofCars*problem.cost_vehicle_use) #fixed 
+    model.add_constr(distance_travel_cost >= quicksum(model._xij[i,j]*problem.DistMatrix[i][j]*problem.cost_unit_travel for [i,j] in model._arcList)) #fixed
+    model.add_constr(lead_time_cost>=quicksum(model._lead_time[i]*problem.cost_unit_travel for i in model._customers)) #variable wrt customers
     
     
 
-    model.setObjective(fixed_vehicle_cost + distance_travel_cost + lead_time_cost + problem.trip_unit_cost*quicksum(model._v[i,k.index] for i in model._customers for k in problem.satellites), GRB.MINIMIZE)
+    model.set_objective(fixed_vehicle_cost + distance_travel_cost + lead_time_cost + problem.trip_unit_cost*quicksum(model._v[i,k.index] for i in model._customers for k in problem.satellites))
 
-    model.setParam('OutputFlag', 0)
-    model.setParam("MIPGap", 0.0)
+    model.verbose = False
+    model.mip_gap = 0.0
     model._fixed_vehicle_cost = fixed_vehicle_cost
     model._distance_travel_cost = distance_travel_cost
     model._lead_time_cost = lead_time_cost
-    model.update()    
+
 
     return
 #the trip assignment model used for checking a single route or a complete route set: the
@@ -316,7 +324,7 @@ def street_problem_MIP(problem, timelimit, single= None, multiple = None, transf
         routes_in = multiple
 
     problem.hard_tw = True
-    model = Model("street_problem_MIP")
+    model = MILP("street_problem_MIP")
         
     
     add_assignment_constraints(problem, model, solution_in)
@@ -344,83 +352,83 @@ def street_routing_MIP(problem, timelimit, customers = None, warm_start = None, 
     """
     start_time = time.time()
     problem.hard_tw = True
-    model = Model("street_routing_MIP")
+    model = MILP("street_routing_MIP")
     add_assignment_constraints(problem, model, None, customers)
     add_capacity_constraints_load(problem, model, None, None)
     add_temporal_constraints(problem, model)
     add_objective(problem, model)
     result = {"feasible": False, "objective": math.inf, "routes": [], "visits": [], "n_vehicles": 0,
-              "gap": math.inf, "status": None, "time": 0.0, "n_vars": model.NumVars, "n_constrs": model.NumConstrs}
+              "gap": math.inf, "status": None, "time": 0.0, "n_vars": model.num_vars, "n_constrs": model.num_constrs,
+              "backend": model.backend}
 
     if warm_start:
         for route in warm_start:
             for [i, j] in generate_arcs(route):
                 if (i, j) in model._arc_set:
-                    model._xij[i, j].Start = 1
+                    model.set_start(model._xij[i, j], 1)
             plan = RH.optimal_transshipment_checking(problem, route)
             if plan["feasible"]:
                 for i, p in plan["satellites"].items():
-                    model._v[i, p].Start = 1
-        model.update()
+                    model.set_start(model._v[i, p], 1)
 
-    model.setParam("MIPGap", 0.0001 if mip_gap is None else mip_gap)
-    model.Params.OutputFlag = 1 if output else 0
-    model.setParam("Timelimit", timelimit)
-    model.setParam("Heuristics", 0.75)
+
+    model.mip_gap = 0.0001 if mip_gap is None else mip_gap
+    model.verbose = bool(output)
+    model.time_limit = timelimit
+    set_search_parameters(model, free_routing=True)
     model.optimize()
-    result["status"] = model.Status
+    result["status"] = model.status
     result["time"] = time.time() - start_time
-    if model.SolCount == 0:
+    if not model.has_solution:
         return result
 
-    used_arcs = [[i, j] for [i, j] in model._arcList if model._xij[i, j].x > 0.5]
+    val = model.value
+    used_arcs = [[i, j] for [i, j] in model._arcList if val(model._xij[i, j]) > 0.5]
     routes = get_routes(problem, used_arcs)
-    visits = [[i, p.index] for p in problem.satellites for i in model._customers if model._v[i, p.index].x > 0.5]
-    result.update(feasible=True, objective=model.ObjVal, routes=routes, visits=visits,
-                  n_vehicles=int(round(model._nofCars.x)), gap=model.MIPGap,
-                  fixed_vehicle_cost=model._fixed_vehicle_cost.x, distance_travel_cost=model._distance_travel_cost.x,
-                  lead_time_cost=model._lead_time_cost.x, transshipment_cost=problem.trip_unit_cost*len(visits))
+    visits = [[i, p.index] for p in problem.satellites for i in model._customers if val(model._v[i, p.index]) > 0.5]
+    gap = model.gap if model.gap is not None and model.gap == model.gap else (0.0 if model.status == "OPTIMAL" else math.inf)
+    result.update(feasible=True, objective=model.obj_value, routes=routes, visits=visits,
+                  n_vehicles=int(round(val(model._nofCars))), gap=gap,
+                  fixed_vehicle_cost=val(model._fixed_vehicle_cost), distance_travel_cost=val(model._distance_travel_cost),
+                  lead_time_cost=val(model._lead_time_cost), transshipment_cost=problem.trip_unit_cost*len(visits))
     return result
 
 def solve_MIP(problem, model,timelimit, solution_in, route_return = False):    
     start_mip = time.time()
-    model.setParam("MIPGap", MIP_GAP)    
-    model.Params.OutputFlag = 0
-    model.setParam("Timelimit", timelimit)
-    model.setParam('Heuristics', 0.75)
-    #model.write("street_scheduling.lp")
-    #model.setParam("Cutoff",problem.best_solution*1.15)
+    model.mip_gap = MIP_GAP
+    model.verbose = False
+    model.time_limit = timelimit
+    set_search_parameters(model)
     model.optimize()
     solution_time_mip = time.time() - start_mip
 
     
     #get the optimal if exists
-    if model.SolCount > 0:
-        mip_gap = model.MIPGap
+    if model.has_solution:
+        val = model.value
+        mip_gap = model.gap
         #assignments
-        number_of_vehicles_used = round(model._nofCars.x,0)
-        used_arcs  = [[i,j] for [i,j] in model._arcList if model._xij[i,j].x>0.1]
-        start_service = [model._h[i].x for i in model._customers]
-        end_service = [model._h[i].x + model._lead_time[i].x for i in model._customers]
+        number_of_vehicles_used = round(val(model._nofCars),0)
+        used_arcs  = [[i,j] for [i,j] in model._arcList if val(model._xij[i,j])>0.1]
+        start_service = [val(model._h[i]) for i in model._customers]
+        end_service = [val(model._h[i]) + val(model._lead_time[i]) for i in model._customers]
  
         demand_list = [problem.nodes[i].demand for i in model._customers]
         sum_demand = sum(demand_list)
         
         min_trips = math.ceil(sum_demand/problem.capacity_SEV)
         #satellite visits
-        satellite_visits = [[i, p.index] for p in problem.satellites for i in model._customers if model._v[i, p.index].x>0.1]
+        satellite_visits = [[i, p.index] for p in problem.satellites for i in model._customers if val(model._v[i, p.index])>0.1]
         transfer_points_im_solution = [x[0] for x in satellite_visits]
         unique_list = set(transfer_points_im_solution)
         if len(unique_list) != len(transfer_points_im_solution): 
             print("Error in transfer point check: multiple satelllite assignments for the same transfer point") #store it for each transshipment 
             SystemExit(0)
-        satellite_decisions = [model._v[i, p.index].x for p in problem.satellites for i in model._customers if model._v[i, p.index].x>0]
-        lead_times = [[i, model._lead_time[i].x] for i in model._customers]
-        obj = model.getObjective()        
-        obj_value = obj.getValue()
-        fixed_vehicle_cost = model._fixed_vehicle_cost.x 
-        distance_travel_cost = model._distance_travel_cost.x
-        lead_time_cost = model._lead_time_cost.x
+        lead_times = [[i, val(model._lead_time[i])] for i in model._customers]
+        obj_value = model.obj_value
+        fixed_vehicle_cost = val(model._fixed_vehicle_cost)
+        distance_travel_cost = val(model._distance_travel_cost)
+        lead_time_cost = val(model._lead_time_cost)
 
         #verification of the solution
         leaving_vehicles = [j for [i,j] in used_arcs if i == 0]

@@ -1,12 +1,26 @@
 """
 Thin MILP adapter so the two-echelon models do not depend on a single solver.
 
-Backends (chosen automatically, or forced with ``MILP(backend=...)``):
+Backends:
 
-* ``"highs"``  – HiGHS through the ``highspy`` package (default, open source, MIT)
+* ``"highs"``  – HiGHS through the ``highspy`` package (default, open source, MIT,
+                 no size limit: the free street routing MIP runs on 100 customers)
+* ``"gurobi"`` – second option, commercial (needs a full license above 2000 variables /
+                 constraints; the pip license is size-limited)
 * ``"scipy"``  – HiGHS through ``scipy.optimize.milp`` (fallback when ``highspy`` is
                  not installed; no warm start, no objective cutoff)
-* ``"gurobi"`` – optional, for cross-checking results with a commercial solver
+
+Choosing the solver, in order of precedence:
+
+1. ``MILP(backend="gurobi")`` for one model,
+2. ``set_default_backend("gurobi")`` for every model built afterwards,
+3. the environment variable ``MIP_SOLVER=gurobi`` (or ``highs`` / ``scipy``),
+4. automatic: highs > scipy > gurobi (the first one installed).
+
+Backend-specific parameters go in ``MILP.params["gurobi"]`` / ``MILP.params["highs"]``
+(e.g. ``{"Heuristics": 0.75}`` / ``{"mip_heuristic_effort": 0.3}``); each backend only
+reads its own entry. ``add_solve_listener(callback)`` calls ``callback(model)`` after
+every solve (used for the pipeline log of all MIP solves).
 
 The modelling surface is deliberately small and mirrors the handful of Gurobi
 features the original code used: binary/integer/continuous variables, linear
@@ -26,6 +40,7 @@ Example
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -194,6 +209,46 @@ CUTOFF = "CUTOFF"  # proven worse than the cutoff
 ERROR = "ERROR"
 
 
+BACKENDS = ("highs", "gurobi", "scipy")
+_default_backend: Optional[str] = None
+_solve_listeners: List = []
+
+
+def set_default_backend(backend: Optional[str]):
+    """Backend of every MILP built afterwards without an explicit backend
+    ("highs", "gurobi", "scipy"; None -> environment variable MIP_SOLVER, then automatic)."""
+    global _default_backend
+    if backend is not None:
+        backend = backend.lower()
+        if backend not in BACKENDS:
+            raise ValueError(f"unknown MIP backend {backend!r}, choose one of {BACKENDS}")
+    _default_backend = backend
+
+
+def default_backend() -> str:
+    """The backend a MILP gets when none is given (see the module docstring)."""
+    if _default_backend:
+        return _default_backend
+    env = os.environ.get("MIP_SOLVER", "").strip().lower()
+    if env:
+        if env not in BACKENDS:
+            raise ValueError(f"MIP_SOLVER={env!r}: choose one of {BACKENDS}")
+        return env
+    return _detect_backend()
+
+
+def add_solve_listener(callback):
+    """callback(model) runs after every MILP.optimize (model.stats holds the result)."""
+    if callback not in _solve_listeners:
+        _solve_listeners.append(callback)
+    return callback
+
+
+def remove_solve_listener(callback):
+    if callback in _solve_listeners:
+        _solve_listeners.remove(callback)
+
+
 def _detect_backend() -> str:
     try:
         import highspy  # noqa: F401
@@ -232,7 +287,9 @@ class SolveStats:
 class MILP:
     def __init__(self, name: str = "model", backend: Optional[str] = None):
         self.name = name
-        self.backend = backend or _detect_backend()
+        self.backend = (backend or default_backend()).lower()
+        if self.backend not in BACKENDS:
+            raise ValueError(f"unknown MIP backend {self.backend!r}, choose one of {BACKENDS}")
         self.vars: List[Var] = []
         self.constrs: List[Constraint] = []
         self.objective = LinExpr()
@@ -243,6 +300,7 @@ class MILP:
         self.cutoff: Optional[float] = None
         self.verbose: bool = False
         self.threads: Optional[int] = None
+        self.params: Dict[str, dict] = {"highs": {}, "gurobi": {}}  # backend-specific parameters
         # results
         self.stats = SolveStats(backend=self.backend)
         self._x: Optional[List[float]] = None
@@ -282,6 +340,14 @@ class MILP:
         return self.stats.status
 
     @property
+    def num_vars(self) -> int:
+        return len(self.vars)
+
+    @property
+    def num_constrs(self) -> int:
+        return len(self.constrs)
+
+    @property
     def has_solution(self) -> bool:
         return self._x is not None
 
@@ -317,6 +383,8 @@ class MILP:
         self.stats.runtime = time.time() - t0
         if self._x is not None and self.stats.obj_value is None:
             self.stats.obj_value = self.expr_value(self.objective)
+        for callback in list(_solve_listeners):
+            callback(self)
         return self.stats.status
 
     # .................................................................... #
@@ -359,6 +427,8 @@ class MILP:
             h.setOptionValue("objective_bound", float(self.cutoff))
         if self.threads:
             h.setOptionValue("threads", int(self.threads))
+        for key, value in self.params.get("highs", {}).items():
+            h.setOptionValue(key, value)
 
         lp = highspy.HighsLp()
         lp.num_col_ = n
@@ -384,10 +454,15 @@ class MILP:
 
         starts_given = [v for v in self.vars if v.start is not None]
         if starts_given:
-            sol = highspy.HighsSolution()
-            sol.col_value = [v.start if v.start is not None else 0.0 for v in self.vars]
-            sol.value_valid = True
-            h.setSolution(sol)
+            # partial start: HiGHS completes it (fixes the given values, solves for the rest)
+            try:
+                h.setSolution(len(starts_given), np.array([v.idx for v in starts_given], dtype=np.int32),
+                              np.array([v.start for v in starts_given], dtype=float))
+            except TypeError:  # older highspy: full vector only
+                sol = highspy.HighsSolution()
+                sol.col_value = [v.start if v.start is not None else 0.0 for v in self.vars]
+                sol.value_valid = True
+                h.setSolution(sol)
 
         h.run()
         ms = h.getModelStatus()
@@ -473,16 +548,20 @@ class MILP:
                 x.Start = v.start
             gv.append(x)
         for con in self.constrs:
-            e = gp.LinExpr([(c, gv[k]) for k, c in con.expr.coefs.items()])
+            items = list(con.expr.coefs.items())
+            e = gp.LinExpr([c for _, c in items], [gv[k] for k, _ in items])
             rhs = -con.expr.const
             if con.sense == "<=":
-                g.addConstr(e <= rhs, name=con.name)
+                g.addLConstr(e, GRB.LESS_EQUAL, rhs, name=con.name)
             elif con.sense == ">=":
-                g.addConstr(e >= rhs, name=con.name)
+                g.addLConstr(e, GRB.GREATER_EQUAL, rhs, name=con.name)
             else:
-                g.addConstr(e == rhs, name=con.name)
-        obj = gp.LinExpr([(c, gv[k]) for k, c in self.objective.coefs.items()]) + self.objective.const
+                g.addLConstr(e, GRB.EQUAL, rhs, name=con.name)
+        items = list(self.objective.coefs.items())
+        obj = gp.LinExpr([c for _, c in items], [gv[k] for k, _ in items]) + self.objective.const
         g.setObjective(obj, GRB.MINIMIZE if self.minimize else GRB.MAXIMIZE)
+        for key, value in self.params.get("gurobi", {}).items():
+            g.setParam(key, value)
         if self.time_limit != INF:
             g.Params.TimeLimit = self.time_limit
         g.Params.MIPGap = self.mip_gap

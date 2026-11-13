@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-pytest.importorskip("gurobipy")
+pytest.importorskip("highspy")
 import Repair_heuristcs as RH  # noqa: E402
 
 

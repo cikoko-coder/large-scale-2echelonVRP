@@ -93,7 +93,7 @@ REFILL_RULE = "two_way"
 
 #tolerance of the time-window checks of the refill DPs: arrivals are sums of Euclidean travel
 #times, so an arrival exactly at the window end can come out 1e-13 too late (the street MIP
-#accepts it within Gurobi's feasibility tolerance)
+#accepts it within the MIP solver's feasibility tolerance)
 TIME_EPS = 1e-9
 
 def refill_points(problem_instance, route):
@@ -165,7 +165,7 @@ def two_way_transshipment_checking(problem_instance, route):
 
     Unlike optimal_transshipment_checking, no plan with more than K* trips is considered, even
     when it would be cheaper (possible when trip_unit_cost is below the detour savings, e.g. the
-    paper setting with trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
+    trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
     :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
     """
     result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)
@@ -934,31 +934,21 @@ def k_best_insertion_repair(problem_instance, solution, pool_nodes, partial = Fa
 
 def k_best_insertion_costs_per_route(problem_instance, solution, customer_node):
         
+    """Every insertion of customer_node that passes the slack-time prefilter is checked by the
+    two-way route check (is_route_feasible: minimum on-time transshipments, then the cheapest
+    plan) and costed exactly: [True, new route, two-way cost with the customer - without].
+    Infeasible insertions are dropped; an empty list means a new route has to be opened."""
     k_best_costs = []
-    
     for route in solution:
-        #get sorted insertions
-        #use slack times AND relaxed feasibility conditions
-        insertions = insert_into_every_index_slack(problem_instance, route, customer_node) 
-        
-        k_best_costs.extend(insertions)  
-
-    status2 = problem_instance.mvrp    
-    if problem_instance.mvrp:
-        feasible_solutions = k_best_costs
-        feasible_solutions.sort(key=lambda x: x[2])
-        mvrp_feas = []        
-        for x in feasible_solutions:
-            result = is_route_feasible(problem_instance, x[1])
-            if result[0]: #return only the cheapest feasible solution with the insertion
-                mvrp_feas.append(result)
-                break
-        k_best_costs = mvrp_feas
-
-    problem_instance.mvrp = status2
-
-    
-        
+        insertions = insert_into_every_index_slack(problem_instance, route, customer_node)
+        if not insertions:
+            continue
+        base_feasible, _, base_cost = is_route_feasible(problem_instance, route)
+        base_cost = base_cost if base_feasible else 0.0
+        for x in insertions:
+            feasible, candidate, cost = is_route_feasible(problem_instance, x[1])
+            if feasible:
+                k_best_costs.append([True, candidate, cost - base_cost])
     return k_best_costs
 
 def insert_into_every_index_slack(problem_instance, input_list, item):
@@ -1191,9 +1181,7 @@ def is_route_feasible(problem_instance, route):
             return False, route, BigNumber
         #the street MIP has no constraint on the return to the garage, so the finish time of the
         #plan is not checked against the garage end (unbounded vehicle time)
-        if problem_instance.mvrp:
-            if ROUTE_CHECK == "dp":
-                return True, route, optimal["cost"] - problem_instance.cost_vehicle_use #the plan is the MIP's
+        if ROUTE_CHECK == "mip":
             feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
             return feas, route, cost
         #exact travel + transshipment cost of the route (vehicle cost excluded, as get_min_multi_trip_cost)
@@ -1232,13 +1220,7 @@ def is_route_feasible(problem_instance, route):
     # Get the distances for each route segment, starting and ending at 0
     
     
-    if problem_instance.mvrp:        
-        feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
-        
-    else:
-        cost = get_min_multi_trip_cost(problem_instance, route)
-
-    
+    feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
     return feas, route, cost 
 
 def remove_infeasible_nodes_slack(problem_instance, route):
@@ -1383,9 +1365,6 @@ def remove_infeasible_nodes(problem_instance, route):
 
 def plot_found_solutions(problem_instance):
 
-    mvrp_stats = problem_instance.mvrp
-    problem_instance.mvrp = False
-
     found_unique = []
 
     for time, sequence in problem_instance.points_found:
@@ -1396,8 +1375,6 @@ def plot_found_solutions(problem_instance):
         
         sol = check_VRP_solution(problem_instance, routes)
         found_unique.append([time, sol.travelStreet, sol.nSEVs,  sol.is_feasible])
-
-    problem_instance.mvrp = mvrp_stats
 
     problem_instance.points_found = [x for x in found_unique if x[3] == True]
 
@@ -1683,10 +1660,7 @@ def check_MVRP_solution(problem_instance, routes):
         print(len(infeasible_nodes) + sum(len(x) for x in routes))
         final_solution = sev.two_echelon_solution() #reinitilize
         final_solution.is_feasible = True
-        mvrp_status_before = problem_instance.mvrp
-        problem_instance.mvrp = True
         routes, infeasible_nodes = k_best_insertion_repair(problem_instance, routes, infeasible_nodes, 3)
-        problem_instance.mvrp = mvrp_status_before
         print(len(infeasible_nodes) + sum(len(x) for x in routes))
         if not infeasible_nodes: #feasible
             assignments = []    

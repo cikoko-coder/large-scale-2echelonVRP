@@ -3,12 +3,8 @@ import io
 import numpy
 import math 
 import time
+from twoe.solver import MILP, quicksum
 import Satellite_scenarios_generation
-from gurobipy import *
-from gurobipy import GRB
-from gurobipy import quicksum
-from gurobipy import Model
-from gurobipy import LinExpr
 import matplotlib.pyplot as plt
 
 def get_distance_matrix(nodes):    
@@ -99,7 +95,7 @@ def optimize_FLP(scenario, satellites, horecas, N, printing = False, dist_in = N
     distance_matrix = get_distance_matrix(all_nodes)
 
     #build model
-    model = Model("facility_location")
+    model = MILP("facility_location")
 
     #decision variables
     x = {}
@@ -107,45 +103,41 @@ def optimize_FLP(scenario, satellites, horecas, N, printing = False, dist_in = N
 
     for i in range(len(horecas)):
         for j in range(len(satellites)):
-            x[i,j] = model.addVar(vtype = GRB.BINARY, name = "x"+str(i)+"."+str(j)) #1 if horeca i is assigned to satellite j, 0 otherwise
+            x[i,j] = model.add_var(vtype = "B", name = "x"+str(i)+"."+str(j)) #1 if horeca i is assigned to satellite j, 0 otherwise
 
     for i in range(len(satellites)):
-        y[i] = model.addVar(vtype = GRB.BINARY, name = "y"+str(i)) #1 if satellite i is open, 0 otherwise
+        y[i] = model.add_var(vtype = "B", name = "y"+str(i)) #1 if satellite i is open, 0 otherwise
     
     #assign each horeca to only a satellite
     for i in range(len(horecas)):
-        model.addConstr(quicksum(x[i,j] for j in range(len(satellites))) == 1)
+        model.add_constr(quicksum(x[i,j] for j in range(len(satellites))) == 1)
         #assign a horeca i to a satellite only if satellite j is open
         for j in range(len(satellites)):
-            model.addConstr(x[i,j]  <= y[j])
+            model.add_constr(x[i,j]  <= y[j])
 
     #open at most N satellites
-    model.addConstr(quicksum(y[i] for i in range(len(satellites))) <= N)
+    model.add_constr(quicksum(y[i] for i in range(len(satellites))) <= N)
 
     #set objective
     obj_FLP = quicksum(x[i,j]*satellite.unit_cost * distance_matrix[horeca.dist_ind, satellite.dist_ind] for i, horeca in enumerate(horecas) for j,satellite in enumerate(satellites)) 
     
-    model.setObjective(obj_FLP, GRB.MINIMIZE)
-    model.update()
-    if printing:
-        model.write("FLP_finding_"+str(N)+"_hubs_scenario_"+scenario+".lp")
+    model.set_objective(obj_FLP)
+    model.verbose = bool(printing)
 
     model.optimize()
 
-    if model.SolCount > 0:
+    if model.has_solution:
         for i in range(len(horecas)):
             for j in range(len(satellites)):
-                if x[i,j].x > 0.5:
+                if model.value(x[i,j]) > 0.5:
                     horecas[i].satellite = satellites[j]
 
         for i in range(len(satellites)):
-            if y[i].x > 0.5:
+            if model.value(y[i]) > 0.5:
                 satellites[i].is_open = True
                 optmal_locations.append(satellites[i])
     else:
-        print("No solution")
-        model.computeIIS()
-        model.write("model_"+str(N)+"_hubs_scenario_"+scenario+".ilp")
+        print("No solution", model.status)
         optmal_locations = None
     return optmal_locations
 

@@ -579,8 +579,6 @@ def perform_N_relocation(problem_instance,current_solution, N):
 
 def Local_search_incumbent(problem_instance, current_solution_in, replications = 5,  iters = 50):
 
-    #mvrp_status = problem_instance.mvrp
-    #problem_instance.mvrp = True
     if type(current_solution_in) != list: # a two-echelon object
         routes1 = [copy.deepcopy(route.sequence) for route in current_solution_in.routes_sevs]
 
@@ -602,7 +600,6 @@ def Local_search_incumbent(problem_instance, current_solution_in, replications =
     final_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes1])
     percentage_imp = (final_cost - initial_cost)/initial_cost
 
-    #problem_instance.mvrp = mvrp_status
     return percentage_imp, routes1
 
 def select_seed_customers(problem_instance, nstart = 5):

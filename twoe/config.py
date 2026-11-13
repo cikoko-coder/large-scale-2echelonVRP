@@ -29,7 +29,7 @@ class ModelConfig:
     time_limit_SE: float = 600.0  # seconds (paper: 10 or 60 min for MILP_SE)
     time_limit_FE: float = 100.0  # seconds (paper: 100 s for benchmark FE problems)
     mip_gap: float = 1e-4
-    backend: Optional[str] = None  # None -> auto (highs > scipy > gurobi)
+    backend: Optional[str] = None  # None -> twoe.solver.default_backend() (MIP_SOLVER env, else highs > scipy > gurobi)
     verbose: bool = False
     threads: Optional[int] = None
 
