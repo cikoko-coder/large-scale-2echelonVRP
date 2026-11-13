@@ -51,7 +51,8 @@ OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
 ROUTE_CHECK = "dp"         # route-level exact check: "dp" (two-way refill DP) or "mip" (street MIP of the fixed route)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" or "optimal"
-TWO_WAY_OBJECTIVE = "makespan"  # plan of the two-way check among the K* plans: "makespan" (earliest return) or "cost"
+TWO_WAY_OBJECTIVE = "duration"  # plan of the two-way check among the K* plans: "duration" (return - departure,
+#                                 latest departure), "makespan" (earliest return) or "cost"
 REPAIR_ALL_STARTS = True   # initialization: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---

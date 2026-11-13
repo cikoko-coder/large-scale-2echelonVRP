@@ -148,14 +148,17 @@ def bothway_optimal_checking(problem_instance, route):
     return optimal_transshipment_checking(problem_instance, route, extra_trips = 0)
 
 #plan of the two-way check among the plans with the minimum number of transshipments K*:
-#  "makespan" -> earliest return to the garage (then cheapest), "cost" -> cheapest (then earliest)
-TWO_WAY_OBJECTIVE = "makespan"
+#  "duration" -> shortest route duration (return - departure, departure as late as possible), then cheapest
+#  "makespan" -> earliest return to the garage with the departure at the garage opening, then cheapest
+#  "cost"     -> cheapest, then earliest
+TWO_WAY_OBJECTIVE = "duration"
 
 def two_way_transshipment_checking(problem_instance, route):
     """
     Route feasibility with the MINIMUM number of transshipments that is on time, then among the
-    plans with that number the one of TWO_WAY_OBJECTIVE: "makespan" = earliest return to the garage
-    (then cheapest), "cost" = cheapest (then earliest). Lexicographic: transshipments first.
+    plans with that number the one of TWO_WAY_OBJECTIVE: "duration" = shortest route duration
+    (return - departure, the departure as late as possible; then cheapest), "makespan" = earliest
+    return with the departure at the garage opening, "cost" = cheapest. Transshipments first.
 
     * m = number of trips of the greedy split (capacity only) is a lower bound. Every split into
       m trips has its k-th refill between the backward (earliest) and forward (latest) greedy
@@ -530,8 +533,10 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
     Cost: every trip counts one trip_unit_cost (the first load included), as the street MIP.
     min_trips_first: pass 2 only for K = K* (two_way_transshipment_checking).
     objective: plan chosen among the K-trip plans of pass 2: "cost" = cheapest (then earliest),
-    "makespan" = earliest end of the last service, i.e. earliest return to the garage for the fixed
-    route (then cheapest). The labels are Pareto-optimal in (time, cost), so both are exact.
+    "makespan" = earliest end of the last service, i.e. earliest return to the garage with the
+    departure at the garage opening (then cheapest), "duration" = shortest route duration, return
+    to the garage minus departure with the departure as late as the windows allow (then cheapest;
+    min_duration_split). The labels are Pareto-optimal in their criteria, so all are exact.
     """
     result = {"feasible": False, "refills": [], "satellites": {}, "cost": BigNumber, "transfer_cost": BigNumber,
               "n_trips": 0, "min_trips": 0, "finish": None, "labels": 0, "attempts": {}, "blocked": None}
@@ -666,6 +671,19 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
     if k_star is None:
         return result
 
+    if objective == "duration" and min_trips_first:
+        plan = min_duration_split(problem_instance, route, k_star, forward, backward, detours, L, can_refill)
+        if plan is not None:
+            refills, extra_cost, departure, finish, duration, labels = plan
+            total = fixed_cost + first_cost_of(unit, det) + extra_cost + k_star*trip_cost
+            result["labels"] += labels
+            result["attempts"][k_star] = "feasible"
+            result.update(feasible=True, n_trips=k_star, cost=total, finish=finish, departure=departure,
+                          duration=duration, transfer_cost=total - fixed_cost,
+                          refills=[route[pos].index for pos in refills],
+                          satellites={route[pos].index: detours[pos][1] for pos in refills})
+            return result
+
     # ---- pass 2: cheapest plan with K trips, K = K*, K*+1, ... ---- #
     def add_label(front, label):
         for other in front:
@@ -730,6 +748,111 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
                   refills=[route[pos].index for pos in refills],
                   satellites={route[pos].index: detours[pos][1] for pos in refills})
     return result
+
+def first_cost_of(unit, det):
+    """Detour cost of the refill before the first customer (every plan has it)."""
+    return unit*det[0]
+
+def min_duration_split(problem_instance, route, K, forward, backward, detours, L, can_refill):
+    """
+    Plan with exactly K trips of minimum route duration (return to the garage - departure from
+    the garage, the departure as late as possible), ties by detour cost.
+    A label at (trip k, start position p) represents its service start as a function of the
+    departure d from the garage, tau(d) = max(d + A, B) for t0 <= d <= D: A = driving + detours +
+    transfers + service so far, B = the time windows' push, D = latest departure keeping every
+    window so far. Next customer j: A += s + t, B = max(B + s + t, e_j), D = min(D, l_j - A),
+    infeasible when B > l_j (a refill before j adds its detour and the transfer duration to the
+    travel). The last customer adds the return to the garage (its end bounds D as well). The
+    duration max(A, B - D) + s_last + t_back is nonincreasing in d, so the latest departure D is
+    optimal for a label. A label dominates another with A, B and cost not larger and D not smaller.
+    :return: (refill positions, detour cost after position 0, departure, end of the last service,
+             duration, labels created) or None
+    """
+    t = problem_instance.travel_matrix
+    unit = problem_instance.cost_unit_travel
+    transfer = problem_instance.TransferDuration
+    capacity = problem_instance.capacity_SEV
+    eps = TIME_EPS
+    n = len(route)
+    t0 = problem_instance.depot.start_interval
+    garage_end = getattr(problem_instance.depot, "end_interval", math.inf)
+    previous = [0] + [node.index for node in route[:-1]]
+    drive = [t[previous[pos]][node.index] for pos, node in enumerate(route)]
+    demand = [node.demand for node in route]
+    opening = [node.start_interval for node in route]
+    closing = [node.end_interval for node in route]
+    service = [node.unloading_time for node in route]
+    det = [d for d, _ in detours]
+    back = t[route[-1].index][0]
+    lo, hi = refill_windows(problem_instance, route, K, forward, backward)
+
+    def arrive(label, q, travel):
+        """label (A, B, D, cost, parent, pos) extended by travel to position q, or None."""
+        A = label[0] + travel
+        B = max(label[1] + travel, opening[q])
+        D = min(label[2], closing[q] - A)
+        if B > closing[q] + eps or D < t0 - eps or max(t0 + A, B) > L[q] + eps:
+            return None
+        return A, B, D
+
+    def add(front, label):
+        for o in front:
+            if o[0] <= label[0] + eps and o[1] <= label[1] + eps and o[2] >= label[2] - eps and o[3] <= label[3] + eps:
+                return False
+        front[:] = [o for o in front if not (label[0] <= o[0] + eps and label[1] <= o[1] + eps
+                                             and label[2] >= o[2] - eps and label[3] <= o[3] + eps)]
+        front.append(label)
+        return True
+
+    first = arrive((0.0, -math.inf, math.inf), 0, drive[0] + det[0] + transfer)
+    if first is None:
+        return None
+    labels = {(0, 0): [(first[0], first[1], first[2], 0.0, None, 0)]}
+    created = 1
+    best = None #(duration, cost, departure, finish, label)
+    for k in range(K):
+        last = k == K - 1
+        for p in range(lo[k], hi[k] + 1):
+            for label in labels.get((k, p), ()):
+                A, B, D, cost = label[0], label[1], label[2], label[3]
+                load = demand[p]
+                if load > capacity:
+                    continue
+                i = p
+                while True:
+                    if i == n - 1:
+                        if last:
+                            D_end = min(D, garage_end - back - service[i] - A)
+                            if B + service[i] + back <= garage_end + eps and D_end >= t0 - eps:
+                                duration = max(A, B - D_end) + service[i] + back
+                                finish = max(D_end + A, B) + service[i]
+                                if best is None or duration < best[0] - eps or \
+                                        (duration <= best[0] + eps and cost < best[1] - eps):
+                                    best = (duration, cost, D_end, finish, label)
+                        break
+                    q = i + 1
+                    if not last and lo[k + 1] <= q <= hi[k + 1] and can_refill[q]:
+                        nxt = arrive((A, B, D), q, service[i] + drive[q] + det[q] + transfer)
+                        if nxt is not None:
+                            if add(labels.setdefault((k + 1, q), []), (nxt[0], nxt[1], nxt[2], cost + unit*det[q], label, q)):
+                                created += 1
+                    load += demand[q]
+                    if load > capacity:
+                        break
+                    nxt = arrive((A, B, D), q, service[i] + drive[q])
+                    if nxt is None:
+                        break
+                    A, B, D = nxt
+                    i = q
+    if best is None:
+        return None
+    duration, cost, departure, finish, label = best
+    refills = []
+    while label is not None:
+        refills.append(label[5])
+        label = label[4]
+    refills.reverse()
+    return refills, cost, departure, finish, duration, created
 
 #route check in front of / instead of the street MIP:
 #  "dp"  -> optimal_transshipment_checking (same plan and cost as the MIP, no solver)
