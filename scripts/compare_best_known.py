@@ -1,4 +1,4 @@
-"""Initial solution (construction, construction + local search) against the best-known solution of
+"""Initial solution (construction, + local search, + local search + ALNS) against the best-known solution of
 data/sols, the best-known SEV routes evaluated by the same two-echelon check (two-way DP + water MIP).
 Usage: python scripts/compare_best_known.py c201.txt <output dir>   -> one JSON line"""
 import sys, io, os, contextlib, time, random, json
@@ -17,12 +17,16 @@ def figures(p, sol):
                 water=round(sol.travelWater,2), dist=round(street+sol.travelWater,2), obj=round(sol.objective,1))
 
 out={}
-for ls in (0,1):
-    P.LOCAL_SEARCH_INITIAL = bool(ls)
+for label, ls, alns in (("constr", 0, 0), ("ls", 1, 0), ("alns", 1, 1)):
+    P.LOCAL_SEARCH_INITIAL, P.ALNS_INITIAL = bool(ls), bool(alns)
     t=time.time()
     with contextlib.redirect_stdout(io.StringIO()):
         p,_ = P.run_initial_construction(name, reports)
-    out["ls" if ls else "constr"] = dict(figures(p, p.best_found), time=round(time.time()-t,1))
+    out[label] = dict(figures(p, p.best_found), time=round(time.time()-t,1))
+    if alns:
+        r = p.alns_report
+        out[label].update(two_way=[round(r["start_cost"],1), round(r["final_cost"],1)], iterations=r["iterations"],
+                          alns_time=round(r["time"],1))
 
 # best known: its SEV routes through the same two-echelon check (transshipments by our DP, water MIP)
 with contextlib.redirect_stdout(io.StringIO()):

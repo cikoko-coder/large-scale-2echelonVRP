@@ -7,6 +7,7 @@ import copy
 import MathModels 
 import Repair_heuristcs as RH
 import local_search as LS
+import alns as ALNS
 import SEVs
 BigNumber = 1000000
 #define set up for ALNS operators instead of creating at each time required such as probs, scores, used times and etc.
@@ -453,6 +454,30 @@ def local_search_initial(problem_instance, solution, seed = None, max_rounds = 2
     if solution is None or not solution.is_feasible:
         return solution, None
     routes, report = LS.local_search(problem_instance, _routes_of(solution), seed = seed, max_rounds = max_rounds)
+    if report["improvement"] <= LS.MIN_GAIN:
+        return solution, report
+    improved = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
+    set_two_way_cost(problem_instance, improved)
+    if not improved.is_feasible:
+        return solution, report
+    return improved, report
+
+def alns_initial(problem_instance, solution, seed = None, iterations = None, time_limit = None, log = None):
+    """
+    Improve an initial multi-trip solution by the ALNS of alns.py (destroy / repair on the SEV
+    routes, two-way check, simulated annealing, relocate + 2-opt* on every new best). The
+    ALNS.ALNS_ELITE best route sets are stored for the two-echelon check; the best is checked again
+    as a multi-trip solution (transshipments by the DP), with its two-way cost set.
+    iterations / time_limit: None -> ALNS.ALNS_ITERATIONS / ALNS.ALNS_TIME_LIMIT.
+    :return: (improved multi-trip solution, or the given one when nothing improved or the start
+             is not feasible, ALNS report)
+    """
+    if solution is None or not solution.is_feasible:
+        return solution, None
+    routes, report = ALNS.alns(problem_instance, _routes_of(solution), seed = seed,
+                               iterations = ALNS.ALNS_ITERATIONS if iterations is None else iterations,
+                               time_limit = ALNS.ALNS_TIME_LIMIT if time_limit is None else time_limit,
+                               log = log)
     if report["improvement"] <= LS.MIN_GAIN:
         return solution, report
     improved = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)

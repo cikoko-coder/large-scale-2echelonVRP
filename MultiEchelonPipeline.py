@@ -42,6 +42,10 @@ CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored 
 REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
 LOCAL_SEARCH_INITIAL = True  # relocate + 2-opt* descent (local_search.py, two-way check) on the constructed
 #                              solution before it becomes a candidate / the MIP warm start
+ALNS_INITIAL = True          # ALNS (alns.py: destroy / repair, two-way check, simulated annealing) after the
+#                              local search, before the solution becomes a candidate / the MIP warm start
+ALNS_ITERATIONS = 1000
+ALNS_TIME_LIMIT = 120        # seconds (None: iterations only)
 # initial solution:
 #   "heuristic"          multi-start insertion only
 #   "mip"                free street routing MIP over all customers only (MathModels.street_routing_MIP)
@@ -346,7 +350,7 @@ def run_initial_construction(instance_name: str, reports: dict):
        are checked again; feasible ones get the water (FE) MIP (FEVmodels) -> the
        two-echelon solution, stored in problem.best_found.
     With LOCAL_SEARCH_INITIAL the constructed solution is improved by the relocate + 2-opt*
-    descent (local_search.py) first. ALNS is not run.
+    descent (local_search.py) first, with ALNS_INITIAL then by the ALNS (alns.py).
     """
     import random
 
@@ -424,7 +428,26 @@ def run_initial_construction(instance_name: str, reports: dict):
                     emit(f"  two-way cost of the improved multi-trip solution {round(improved.two_way_cost, 1)}")
                     emit(describe_solution(problem, improved, "improved multi-trip solution (street level)"))
                     construction = improved
-        candidates.append(("heuristic" + ("+ls" if LOCAL_SEARCH_INITIAL else ""), construction))
+        if ALNS_INITIAL:
+            MLD.set_two_way_cost(problem, construction)
+            t_alns = time.time()
+            improved, alns_report = MLD.alns_initial(problem, construction, seed=RANDOM_SEED,
+                                                     iterations=ALNS_ITERATIONS, time_limit=ALNS_TIME_LIMIT,
+                                                     log=emit)
+            emit("")
+            emit(f"--- step 1++: ALNS ({ALNS_ITERATIONS} iterations, time limit {ALNS_TIME_LIMIT}s, two-way check): "
+                 f"{time.time() - t_alns:.2f}s")
+            if alns_report is None:
+                emit("  skipped: the solution is not feasible")
+            else:
+                emit("  " + MLD.ALNS.format_report(alns_report))
+                if improved is not construction:
+                    emit(f"  two-way cost of the improved multi-trip solution {round(improved.two_way_cost, 1)}")
+                    emit(describe_solution(problem, improved, "ALNS multi-trip solution (street level)"))
+                    construction = improved
+            problem.alns_report = alns_report
+        candidates.append(("heuristic" + ("+ls" if LOCAL_SEARCH_INITIAL else "") + ("+alns" if ALNS_INITIAL else ""),
+                           construction))
     if INITIAL_METHOD in ("mip", "heuristic+mip", "heuristic+free_mip"):
         warm = None
         if INITIAL_METHOD == "heuristic+mip" and construction is not None and construction.is_feasible:
