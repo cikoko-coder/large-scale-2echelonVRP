@@ -1,61 +1,53 @@
 import os
 import time
 import math
+import random
 import collections
 from datetime import date
-from os import walk # assuming necessary for other files/folders
 # The heuristics (Repair_heuristcs, SEVs) build their nodes and read
 # closest_satellite_network from the instanceGenerator module, so the pipeline
-# generates its problems with it. ProblemGenerator (refactored copy) is kept
-# importable but lacks closest_satellite_network and uses other vehicle costs.
+# generates its problems with it.
 import instanceGenerator
-import ProblemGenerator
 import Multi_level_destroy as MLD
 import Repair_heuristcs as RH
+import local_search as LS
+
+# Solution procedure (run_instance): the Iterated Tabu Search of the manuscript (Section 5, Figure 4)
+#   ITS iteration k = 1..N_ITS (Multi_level_destroy.Solve_by_decomposition, its_iter = k):
+#     k = 1: Init (multi-start greedy insertion, N_INIT starts) and local search (relocate +
+#            crossover, R_LS repetitions) on the best initial solution
+#     every k: ALNS (MLD destroy + the single repair RH.k_best_insertion_repair, N_ALNS iterations)
+#            from R*, local search on the best ALNS solution (N_LS * k: intensification grows with k),
+#            tabu list update + repair of the found schedules; R* = fewest SEVs, then two-way cost
+#   FE optimization (Multi_level_destroy.Optimize_FE): the min-fleet SE solutions (at most
+#     FE_CANDIDATES) -> FE routing MILP + satellite-removal consolidation (check_found_solutions)
+#   report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
 
 # --- CONFIGURATION ---
-# Parameters are now defined once as clear constants
 BENCHMARK_MODE = True
 DEMAND_SET_INDEX = 1
 N_SATELLITES = 8
-REP_ITS = 2
-START_CONS = 2
-REP_LOCAL_SEARCH = 2
-ITER_LOCAL_SEARCH = 2
-ITER_ALNS = 2
-IS_SYNCHRONIZED = True  # Directly use boolean
-TABU_SEARCH_ACTIVE = False # Directly use boolean
+IS_SYNCHRONIZED = True
+TABU_SEARCH_ACTIVE = True  # tabu list T of infeasible routes (route-level exact check)
 INSTANCES_TO_RUN = ["c201.txt", "c208.txt", "r201.txt", "r208.txt", "rc201.txt", "rc208.txt"]
 
-# Which part of the method to run:
-#   "initial" -> problem generation + initial solution construction only
-#   "full"    -> the complete iterative method (run_instance)
-STAGE = "initial"
-RANDOM_SEED = 32           # same seed rule as Solve_by_decomposition: seed + its_iter
+# ITS parameters (manuscript Section 6.1)
+N_INIT = 5                 # starts of the multi-start initialization
+N_ITS = 5                  # ITS iterations
+R_LS = 5                   # maximum repetitions of the local search
+N_LS = 500                 # local search iterations (times the ITS iteration k)
+N_ALNS = 500               # ALNS iterations per ITS iteration
+SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
+FE_CANDIDATES = 10         # min-fleet SE solutions sent to the FE MILP (None: all of them)
+
+RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)
 LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
-MIP_SOLVER = None          # None: environment variable MIP_SOLVER, else the free HiGHS solver; "highs", "gurobi" (second option) or "scipy"
+MIP_SOLVER = None          # None: environment variable MIP_SOLVER, else the free HiGHS solver; "highs", "gurobi" or "scipy"
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
-ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
-REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
-CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
-REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
-LOCAL_SEARCH_INITIAL = True  # relocate + 2-opt* descent (local_search.py, two-way check) on the constructed
-#                              solution before it becomes a candidate / the MIP warm start
-# initial solution:
-#   "heuristic"          multi-start insertion only
-#   "mip"                free street routing MIP over all customers only (MathModels.street_routing_MIP)
-#   "heuristic+free_mip" both as two independent initialization methods: the MIP gets NO routes
-#                        (no warm start, no fixed arcs); both route sets are stored for the
-#                        two-echelon check and the initial solution is the one with the smaller
-#                        two-way cost (RH.two_way_solution_cost)
-#   "heuristic+mip"      the MIP warm-started with the best heuristic routes
-# The MIPs run on the free HiGHS solver by default (no size limit: the free routing MIP runs on
-# all 100 customers). Gurobi is the second option (MIP_SOLVER = "gurobi"; needs a full license for
-# 100 customers, the pip license stops at 2000 variables). If the MIP fails the heuristic solution is used.
-INITIAL_METHOD = "heuristic+mip"   # MIP warm-started with the heuristic routes (free HiGHS, 100 customers)
-MIP_INITIAL_TIMELIMIT = 300   # seconds for the free routing MIP (5 min)
-MIP_INITIAL_CUSTOMERS = None  # None: all customers; an int n restricts the instance to the first n customers (testing)
+ROUTE_CHECK = "dp"         # route-level exact check: "dp" (two-way refill DP) or "mip" (street MIP of the fixed route)
+REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" or "optimal"
+REPAIR_ALL_STARTS = True   # initialization: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---
 
@@ -150,170 +142,6 @@ def describe_solution(problem, solution, title):
     return "\n".join(lines)
 
 
-def replay_route_timeline(problem, route, transfer_points, satellite_of=None):
-    """Replay the time check of RH.is_route_feasible for a route and given transfer points.
-
-    Same rules as is_route_feasible: the vehicle leaves the garage at the vehicle start;
-    at a transfer point the vehicle goes through a satellite (detour = closest satellite,
-    as closest_satellite_network.check_arc_cost, unless satellite_of gives the satellite)
-    and the transfer duration is added; it waits for the window opening and fails when it
-    arrives after the window end. Returns (rows, first_violation or None, end time).
-    """
-    network = problem.closest_satellite_network
-    t = problem.travel_matrix
-    current_time = problem.depot.start_interval
-    prev = 0
-    rows, violation = [], None
-    for pos, node in enumerate(route):
-        drive = network.distance_matrix[prev][node.index]
-        satellite, detour = None, 0.0
-        if node.index in transfer_points:
-            if satellite_of and node.index in satellite_of:
-                satellite = satellite_of[node.index]
-                detour = t[prev][satellite] + t[satellite][node.index] - t[prev][node.index]
-            else:
-                detour, satellite = network.get_closest_satellite_metrics(prev, node.index)
-        arrival = current_time + drive + detour + (problem.TransferDuration if satellite is not None else 0)
-        start = max(arrival, node.start_interval)
-        late = arrival - node.end_interval
-        rows.append((pos, node.index, satellite, round(float(detour), 1), round(float(arrival), 1),
-                     node.start_interval, node.end_interval, round(float(start), 1), round(float(late), 1) if late > 0 else 0))
-        if late > 0 and violation is None:
-            violation = (pos, node.index, round(float(arrival), 1), node.end_interval, round(float(late), 1))
-            break
-        current_time = start + node.unloading_time
-        prev = node.index
-    return rows, violation, current_time
-
-
-def trace_route_check(problem, route):
-    """Explain the result of RH.is_route_feasible for one route: minimum-transshipment DP,
-    bounded DP (the rule) and, with CROSS_CHECK_MIP, the street MIP for comparison."""
-    info = {"n": len(route), "demand": sum(node.demand for node in route)}
-    info["makespan_vehicles"] = RH.get_makespan(problem, route)
-    info["tabu"] = RH.is_in_tabu_list(problem, route)
-    t0 = time.time()
-    info["relaxed_feasible"] = RH.is_route_feasible(problem, route)[0]
-    info["time_check"] = time.time() - t0
-    minimum = RH.bothway_optimal_checking(problem, route)
-    t0 = time.time()
-    bounded = RH.optimal_transshipment_checking(problem, route)
-    info["time_dp"] = time.time() - t0
-    info["minimum"], info["bounded"] = minimum, bounded
-    info["m"] = bounded["min_trips"]
-    info["dp_transfers"] = bounded["refills"]
-    info["n_trips"] = bounded["n_trips"]
-
-    if info["makespan_vehicles"] > 1:
-        info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
-    elif info["tabu"]:
-        info["reason"] = "route contains a tabu sequence"
-    elif not bounded["feasible"] and not bounded["attempts"] and bounded.get("blocked"):
-        pos, customer, late = bounded["blocked"][:3]
-        info["reason"] = (f"the sequence itself misses a time window: even the fastest schedule (one loading "
-                          f"before the first customer, no refill afterwards) reaches customer {customer} "
-                          f"(position {pos}) {round(late, 1)} late, so no refill plan can be on time")
-    elif not bounded["feasible"]:
-        attempts = "; ".join(f"K={k}: {v}" for k, v in bounded["attempts"].items())
-        info["reason"] = f"no refill plan is within capacity and on time ({attempts})"
-    elif not minimum["feasible"]:
-        info["reason"] = (f"minimum m={info['m']} transshipments is late ({minimum['attempts'].get(info['m'])}); "
-                          f"{bounded['n_trips']} transshipments are on time")
-    else:
-        info["reason"] = "-"
-
-    info["mip_feasible"] = None
-    if CROSS_CHECK_MIP:
-        import MathModels
-        t0 = time.time()
-        feasible, cost, visits, _ = MathModels.street_problem_MIP(problem, problem.timelimit_SEmodel, route)
-        info["time_mip"] = time.time() - t0
-        info["mip_feasible"], info["mip_cost"] = feasible, cost
-        info["mip_transfers"] = [i for i, p in visits] if feasible else []
-        #solve_MIP runs with MIPGap 1e-4: the MIP may return a plan up to 1e-4 * objective more
-        #expensive than the optimum (about 4 cost units at 40000); the DP is exact
-        gap = 1e-4*(abs(cost) + problem.cost_vehicle_use + sum(
-            problem.travel_matrix[a][b] for a, b in zip([0] + [n.index for n in route], [n.index for n in route] + [0])))
-        dp_cost = bounded["cost"] - problem.cost_vehicle_use #route travel cost, as the MIP returns it
-        info["mip_agrees"] = (feasible == bounded["feasible"]
-                              and (not feasible or dp_cost <= cost + 1e-3))
-        info["mip_within_gap"] = feasible and bounded["feasible"] and cost - dp_cost > 1e-3 \
-            and cost - dp_cost <= gap + 1e-3
-        if feasible:
-            satellite_of = {i: p for i, p in visits}
-            rows2, violation2, _ = replay_route_timeline(problem, route, info["mip_transfers"], satellite_of)
-            info["mip_rows"], info["mip_replay_violation"] = rows2, violation2
-    if bounded["feasible"]:
-        rows, violation, end = replay_route_timeline(problem, route, bounded["refills"], bounded["satellites"])
-        info["rows"], info["violation"], info["end"] = rows, violation, end
-    return info
-
-
-def diagnose_two_echelon_filter(problem, emit, details):
-    """Replays the first gate of RH.check_found_solutions for every stored solution.
-
-    check_found_solutions keeps a stored route set only if check_VRP_solution says it is
-    feasible, i.e. RH.is_route_feasible holds for every route; only those sets reach the
-    multi-trip / MVRP checks and the water (FE) MIP. Nothing in problem is changed.
-    Returns a statistics dict (routes checked, routes with K > m, DP/MIP agreement, times).
-    """
-    emit(f"stored complete solutions: {len(problem.heuristics_solutions)} (cutoff {problem.cutoff}, "
-         f"min vessels bound {problem.minVessel_bound}); route check rule {RH.REFILL_RULE}, "
-         f"per-route check {RH.ROUTE_CHECK}, MIP cross-check {CROSS_CHECK_MIP}")
-    stats = collections.Counter()
-    for k, sequences in enumerate(problem.heuristics_solutions):
-        routes = [[problem.nodes[x] for x in sequence] for sequence in sequences]
-        checked = sorted(sequences, key=lambda x: x[0]) in problem.checked_solutions
-        traces = [trace_route_check(problem, route) for route in routes]
-        passes = all(tr["relaxed_feasible"] for tr in traces)
-        extra = sum(1 for tr in traces if tr["bounded"]["feasible"] and tr["n_trips"] > tr["m"])
-        stats["solutions"] += 1
-        stats["solutions_pass"] += passes
-        stats["routes"] += len(traces)
-        stats["routes_feasible"] += sum(tr["bounded"]["feasible"] for tr in traces)
-        stats["routes_extra_transshipment"] += extra
-        stats["routes_minimum_infeasible_but_feasible"] += sum(
-            1 for tr in traces if tr["bounded"]["feasible"] and not tr["minimum"]["feasible"])
-        stats["time_dp"] += sum(tr["time_dp"] for tr in traces)
-        if CROSS_CHECK_MIP:
-            stats["time_mip"] += sum(tr["time_mip"] for tr in traces)
-            stats["mip_disagree"] += sum(1 for tr in traces if not tr["mip_agrees"])
-        emit(f"  solution {k}: {len(routes)} routes, sizes {[len(r) for r in routes]}, "
-             f"trips {[tr['n_trips'] if tr['bounded']['feasible'] else '-' for tr in traces]} "
-             f"(minimum {[tr['m'] for tr in traces]}), already checked {checked} -> "
-             + ("passes the route check, goes on to the multi-trip/MVRP/FE checks" if passes
-                else "REJECTED by the route check (never reaches the FE solver)"))
-        stats["mip_within_gap"] += sum(1 for tr in traces if tr.get("mip_within_gap"))
-        for r, tr in enumerate(traces):
-            if tr["reason"] == "-" and (tr["mip_feasible"] is None or (tr["mip_agrees"] and not tr["mip_within_gap"])):
-                continue
-            mip = ""
-            if tr["mip_feasible"] is not None:
-                mip = (f"; street MIP feasible (cost {round(tr['mip_cost'], 1)}, {len(tr['mip_transfers'])} transshipments)"
-                       if tr["mip_feasible"] else "; street MIP infeasible")
-                if not tr["mip_agrees"]:
-                    mip += "  ** DP and MIP DISAGREE **"
-                elif tr["mip_within_gap"]:
-                    mip += "  (MIP plan is suboptimal within its MIPGap 1e-4; the DP plan is cheaper)"
-            emit(f"    route {r} ({tr['n']} customers, demand {tr['demand']}): {tr['reason']}{mip}")
-            emit(f"      transfer points DP {tr['dp_transfers']}" +
-                 (f"  |  street MIP {tr['mip_transfers']}" if tr["mip_feasible"] is not None else ""))
-            details.append(f"solution {k} route {r}: {tr['reason']}")
-            if tr["bounded"]["feasible"]:
-                details.append("  timeline with the DP transfer points (pos, customer, satellite, detour, arrival, e, l, start, late)")
-                details += [f"    {row}" for row in tr["rows"]]
-            if tr.get("mip_feasible"):
-                details.append("  timeline with the street MIP transfer points and satellites")
-                details += [f"    {row}" for row in tr["mip_rows"]]
-    emit(f"  routes checked {stats['routes']}, feasible {stats['routes_feasible']}, "
-         f"needing more than the minimum transshipments {stats['routes_extra_transshipment']} "
-         f"(rejected by the minimum rule {stats['routes_minimum_infeasible_but_feasible']}); "
-         f"DP time {stats['time_dp']:.3f}s" +
-         (f", MIP time {stats['time_mip']:.3f}s, disagreements {stats['mip_disagree']}, "
-          f"MIP plans suboptimal within the gap {stats['mip_within_gap']}" if CROSS_CHECK_MIP else ""))
-    return stats
-
-
 def build_problem(instance_name: str, reports: dict):
     """Generate the instance and set the run parameters (shared by every stage)."""
     if BENCHMARK_MODE:
@@ -336,248 +164,151 @@ def build_problem(instance_name: str, reports: dict):
     return problem
 
 
-def run_initial_construction(instance_name: str, reports: dict):
-    """Problem generation + initial solution construction (first block of Solve_by_decomposition).
+def solution_figures(problem, solution):
+    """SEVs / FEVs / trips, street (distance + detours), water, distance, objective of a two-echelon solution."""
+    if solution is None:
+        return {"feasible": False}
+    trips = len(solution.transshipments)
+    street = solution.travelStreet - problem.trip_unit_cost*trips
+    return {"feasible": bool(solution.is_feasible), "sevs": solution.nSEVs, "fevs": int(solution.nFEVs),
+            "trips": trips, "street": round(street, 2), "water": round(solution.travelWater, 2),
+            "distance": round(street + solution.travelWater, 2), "objective": round(solution.objective, 2)}
 
-    1. multi_start_initial: START_CONS seed customers, k-best insertion builds the SEV
-       routes, then check_feasibility(multi_trip=True) solves the street MIP of every
-       route (MathModels.street_problem_MIP) -> multi-trip (MVRP) solution.
-    2. RH.check_found_solutions: the complete route sets stored during the construction
-       are checked again; feasible ones get the water (FE) MIP (FEVmodels) -> the
-       two-echelon solution, stored in problem.best_found.
-    With LOCAL_SEARCH_INITIAL the constructed solution is improved by the relocate + 2-opt*
-    descent (local_search.py) first. ALNS is not run.
-    """
-    import random
 
+SUMMARY_COLUMNS = ["instance", "customers", "init_sevs", "init_two_way", "init_ls_sevs", "init_ls_two_way",
+                   "its_sevs", "its_two_way", "fe_candidates", "feasible", "sevs", "fevs", "trips", "street",
+                   "water", "distance", "objective", "time_init", "time_its", "time_fe", "time_total"]
+
+
+def write_summary(row):
+    """Append the row to summary_<date>.csv (header written with the first row)."""
+    filename = f"summary_{date.today()}.csv"
+    new = not os.path.exists(filename)
+    with open(filename, "a") as f:
+        if new:
+            f.write(",".join(SUMMARY_COLUMNS) + "\n")
+        f.write(",".join(str(row.get(c, "")) for c in SUMMARY_COLUMNS) + "\n")
+
+
+def format_key(key):
+    return f"{key[0]} SEVs, two-way cost {round(key[1], 1)}" if key else "-"
+
+
+def format_alns(report):
+    used, scores = report["used"], report["scores"]
+    levels = "; ".join(f"{level}: " + ", ".join(f"{o} used {used[level][o]} score {round(scores[level][o], 1)}"
+                                                for o in used[level]) for level in ("roulette", "removal", "size"))
+    return (f"ALNS {report['iterations']} iterations (temperature {round(report['temperature'], 2)}): "
+            f"{format_key(report['start_key'])} -> best {format_key(report['best_key'])} at iteration {report['best_iteration']}; "
+            f"accepted improving {report['accepted_improving']}, worse (SA) {report['accepted_worse']}, "
+            f"aspiration {report['aspiration']}, rejected {report['rejected']}, infeasible {report['infeasible']}\n"
+            f"      MLD {levels}")
+
+
+def run_instance(instance_name: str, reports: dict):
+    """Solve one instance by the ITS (procedure at the top of the file).
+    :return: (problem, final two-echelon solution or None, summary row)"""
     backend = configure_mip_solver()
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
+    MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     out = []
 
     def emit(text=""):
         print(text, flush=True)
         out.append(text)
 
-    t_build = time.time()
     problem = build_problem(instance_name, reports)
-    emit(f"=== {instance_name}: initial solution construction ===")
+    emit(f"=== {instance_name} ===")
     emit(f"customers {len(problem.customers)}, satellites {len(problem.satellites)}, "
-         f"SEV capacity {problem.capacity_SEV}, FEV capacity {problem.capacity_FEV}, "
-         f"synchronized {problem.synch_check}")
+         f"SEV capacity {problem.capacity_SEV}, FEV capacity {problem.capacity_FEV}, synchronized {problem.synch_check}")
     emit(f"costs: c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
-    emit(f"MIP solver {backend}")
-    emit(f"street MIP time limit {problem.timelimit_SEmodel}s, water MIP time limit {problem.timelimit_FEmodel}s, "
-         f"min vessels bound {problem.minVessel_bound}")
-    customer_windows = [(node.start_interval, node.end_interval) for node in problem.customers]
-    emit(f"customer windows: earliest open {min(e for e, l in customer_windows)}, latest close {max(l for e, l in customer_windows)}")
-    emit(f"vehicle time: unbounded {problem.unbounded_vehicle_time}, garage [{problem.depot.start_interval}, {problem.depot.end_interval}], "
-         f"satellites [{problem.satellites[0].start_interval}, {problem.satellites[0].end_interval}], "
-         f"CDC [{problem.CDC.start_interval}, {problem.CDC.end_interval}]")
-    emit(f"instance generation {time.time() - t_build:.2f}s")
-
-    # customers that cannot be served even alone (same check as Solve.py)
+    emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
+         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}")
+    emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), up to {FE_CANDIDATES} min-fleet SE solutions")
     removed = instanceGenerator.check_feasibility_all_nodes(problem)
     emit(f"customers infeasible on their own: {removed if removed else 'none'}")
 
-    # time required for building the problem is not counted (as in Solve.py)
+    # time required for building the problem is not counted
     problem.modelStartTime = time.time()
-    problem.its_iter = 1
-    random.seed(RANDOM_SEED + problem.its_iter)
     problem.customers = [node for node in problem.nodes if node.index > 0]
+    problem.best_SE = None
+    problem.its_log = []
+    row = {"instance": instance_name.split(".")[0], "customers": len(problem.customers)}
 
-    if MIP_INITIAL_CUSTOMERS is not None:
-        problem.customers = sorted(problem.customers, key=lambda node: node.index)[:MIP_INITIAL_CUSTOMERS]
-        emit(f"TESTING: instance restricted to the first {len(problem.customers)} customers")
-
-    # --- step 1: initial solution(s) --------------------------------------
-    n_mip = len(mip_log) if mip_log is not None else 0
-    t1 = time.time()
-    construction = None
-    candidates = []  # (method, multi-trip solution); the initial solution is chosen by the two-way cost
-    if INITIAL_METHOD in ("heuristic", "heuristic+mip", "heuristic+free_mip"):
-        construction = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
-        t_construction = time.time() - t1
+    # --- ITS on the SE level --------------------------------------------------------
+    t_its = time.time()
+    for k in range(1, N_ITS + 1):
+        problem.its_iter = k
+        MLD.Solve_by_decomposition(RANDOM_SEED, problem, N_INIT, R_LS, k*N_LS, N_ALNS)
+        log = problem.its_log[-1]
         emit("")
-        emit(f"--- step 1: multi-start construction ({START_CONS} starts) + transshipment check per route ({RH.ROUTE_CHECK}): {t_construction:.2f}s")
-        for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
-            MLD.set_two_way_cost(problem, sol)
-            emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'} multi-trip solution, "
-                 f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}, "
-                 f"two-way cost {round(sol.two_way_cost, 1)}")
-        emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
-        if LOCAL_SEARCH_INITIAL:
-            MLD.set_two_way_cost(problem, construction)
-            t_ls = time.time()
-            improved, ls_report = MLD.local_search_initial(problem, construction, seed=RANDOM_SEED)
-            emit("")
-            emit(f"--- step 1+: local search (relocate + 2-opt*, two-way check): {time.time() - t_ls:.2f}s")
-            if ls_report is None:
-                emit("  skipped: the constructed solution is not feasible")
-            else:
-                emit("  " + MLD.LS.format_report(ls_report))
-                if improved is not construction:
-                    emit(f"  two-way cost of the improved multi-trip solution {round(improved.two_way_cost, 1)}")
-                    emit(describe_solution(problem, improved, "improved multi-trip solution (street level)"))
-                    construction = improved
-        candidates.append(("heuristic" + ("+ls" if LOCAL_SEARCH_INITIAL else ""), construction))
-    if INITIAL_METHOD in ("mip", "heuristic+mip", "heuristic+free_mip"):
-        warm = None
-        if INITIAL_METHOD == "heuristic+mip" and construction is not None and construction.is_feasible:
-            warm = [route.sequence for route in construction.routes_sevs]
-        t1 = time.time()
-        try:
-            mip_solution, mip_result = MLD.mip_initial_solution(problem, MIP_INITIAL_TIMELIMIT, warm_start=warm,
-                                                                customers=problem.customers)
-        except Exception as error:  # e.g. the size-limited Gurobi license
-            mip_solution, mip_result = None, {"feasible": False, "status": f"error: {error}", "n_vars": "?", "n_constrs": "?",
-                                              "time": time.time() - t1, "objective": math.inf, "gap": math.inf}
-        emit("")
-        emit(f"--- step 1{'b' if construction is not None else ''}: free street routing MIP over {len(problem.customers)} customers"
-             f"{' warm-started with the heuristic routes' if warm else ' (no routes passed, no warm start)'}, "
-             f"time limit {MIP_INITIAL_TIMELIMIT}s: {mip_result['time']:.1f}s")
-        emit(f"  model: {mip_result['n_vars']} variables, {mip_result['n_constrs']} constraints, status {MIP_STATUS.get(mip_result['status'], mip_result['status'])}, "
-             f"objective {round(mip_result['objective'], 1) if mip_result['feasible'] else '-'}, gap {round(mip_result['gap'], 4) if mip_result['feasible'] else '-'}")
-        if mip_result["feasible"]:
-            levels = mip_result.get("objective_levels", [])
-            if len(levels) == 3:
-                emit(f"  hierarchical objective: fleet {round(levels[0])}, transshipments {round(levels[1])}, "
-                     f"distance + detours {round(levels[2], 1)} (objective above = paper cost of this solution)")
-            emit(f"  objective parts: vehicles {mip_result['fixed_vehicle_cost']}, distance {round(mip_result['distance_travel_cost'], 1)}, "
-                 f"detours {round(mip_result['lead_time_cost'], 1)}, transshipments {mip_result['transshipment_cost']} ({len(mip_result['visits'])})")
-            tw = mip_result["two_way_mip_routes"]
-            emit(f"  two-way check of the MIP routes: feasible {tw['feasible']}, cost {round(tw['cost'], 1)}, "
-                 f"{tw['n_vehicles']} SEVs, {tw['n_trips']} trips (MIP: {len(mip_result['visits'])} transshipments)")
-            emit(describe_solution(problem, mip_solution, "MIP multi-trip solution (street level, transshipments re-placed by the two-way DP)"))
-            emit(f"  two-way cost of the MIP multi-trip solution {round(mip_solution.two_way_cost, 1)}")
-            candidates.append(("free_mip" if warm is None else "warm_mip", mip_solution))
-        else:
-            emit("  no MIP solution")
-    method, chosen = MLD.select_initial_by_two_way(problem, candidates)
-    if chosen is not None:
-        construction = chosen
-        emit("")
-        emit("initial solution decided by the two-way cost: " + ", ".join(
-            f"{name} {round(sol.two_way_cost, 1)}" for name, sol in candidates if sol is not None)
-             + f" -> {method}")
-    problem.initial_method = method
-    problem.initial_candidates = candidates
-    if mip_log is not None:
-        emit(summarize_mip_calls(mip_log, n_mip))
-    emit(f"complete route sets stored for the two-echelon check: {len(problem.heuristics_solutions)}")
-
-    # --- step 2a: the gate in front of the FE solver, traced -----------------
+        emit(f"--- ITS iteration {k}: {log['time']:.1f}s, R* {format_key(problem.best_SE_key)} "
+             f"(from {problem.best_SE_phase}), tabu list {log['tabu_list']} routes")
+        if "init" in log:
+            emit(f"  init ({N_INIT} starts): {log['init']['time']:.1f}s, best {format_key(log['init']['key'])}")
+            emit(f"  local search on the initial solution: {log['init_ls']['time']:.1f}s, "
+                 f"R* {format_key(log['init_ls']['key'])}; {LS.format_report(log['init_ls_report'])}")
+            row["time_init"] = round(log["init"]["time"] + log["init_ls"]["time"], 2)
+            row["init_sevs"], row["init_two_way"] = log["init"]["key"][0], round(log["init"]["key"][1], 1)
+            row["init_ls_sevs"], row["init_ls_two_way"] = log["init_ls"]["key"][0], round(log["init_ls"]["key"][1], 1)
+        emit(f"  {format_alns(log['alns_report'])}")
+        emit(f"  ALNS {log['alns']['time']:.1f}s, {log['alns']['stored']} new solutions stored")
+        emit(f"  local search on the best ALNS solution + neighborhood processing: {log['ls']['time']:.1f}s; "
+             f"{LS.format_report(log['ls_report'])}")
+    row["time_its"] = round(time.time() - t_its - row.get("time_init", 0), 2)
+    row["its_sevs"], row["its_two_way"] = problem.best_SE_key[0], round(problem.best_SE_key[1], 1)
     emit("")
-    emit("--- step 2a: relaxed feasibility check of the stored solutions (gate of check_found_solutions)")
-    details = []
-    diagnose_two_echelon_filter(problem, emit, details)
-    with open(f"filter_check_{instance_name.split('.')[0]}_{date.today()}.txt", "w") as f:
-        f.write("\n".join(details) + "\n")
+    emit(describe_solution(problem, problem.best_SE, "R* after the ITS (multi-trip SE solution)"))
 
-    # --- step 2: two-echelon check of the stored solutions (water MIPs) ----
+    # --- FE optimization (MILP) ------------------------------------------------------
     n_mip = len(mip_log) if mip_log is not None else 0
-    t2 = time.time()
-    RH.check_found_solutions(problem)
-    t_two_echelon = time.time() - t2
+    t = time.time()
+    stored = len(problem.heuristics_solutions)
+    final, n_candidates = MLD.Optimize_FE(problem, FE_CANDIDATES)
+    row["time_fe"] = round(time.time() - t, 2)
+    row["fe_candidates"] = n_candidates
     emit("")
-    emit(f"--- step 2b: check_found_solutions (street + water MIPs): {t_two_echelon:.2f}s")
-    emit(f"two-echelon feasible {len(problem.feas_solutions)}, infeasible {len(problem.inf_solutions)}, "
-         f"rejected before the water level {len(problem.checked_solutions) - len(problem.feas_solutions) - len(problem.inf_solutions)}")
+    emit(f"--- FE optimization: {n_candidates} min-fleet SE solutions of {stored} stored -> FE MILP + "
+         f"satellite-removal consolidation: {row['time_fe']:.2f}s")
+    emit(f"  two-echelon feasible {len(problem.feas_solutions)}, not feasible or cut off by the incumbent "
+         f"objective {len(problem.inf_solutions)}")
     if mip_log is not None:
-        emit(summarize_mip_calls(mip_log, n_mip))
+        emit("  " + summarize_mip_calls(mip_log, n_mip).replace("\n", "\n  "))
     for k, sol in enumerate(problem.feas_solutions):
-        emit(f"  two-echelon feasible solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, "
-             f"{sol.nFEVs} FEVs, travel total {round(sol.travelTotal, 1)}")
-    emit(describe_solution(problem, problem.best_found, "initial two-echelon solution (problem.best_found)"))
-    if problem.best_found is None:
-        emit("NOTE: no two-echelon solution -> Solve_by_decomposition would stop in Local_search_incumbent.")
+        emit(f"  solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, {sol.nFEVs} FEVs, "
+             f"travel total {round(sol.travelTotal, 1)}")
 
-    runtime = time.time() - problem.modelStartTime
+    # --- report ------------------------------------------------------------------------
+    row.update(solution_figures(problem, final))
+    row["time_total"] = round(time.time() - problem.modelStartTime, 2)
     emit("")
-    emit(f"total construction time {runtime:.2f}s")
-
-    with open(f"initial_construction_{instance_name.split('.')[0]}_{date.today()}.txt", "w") as f:
+    emit(describe_solution(problem, final, "final two-echelon solution"))
+    emit(f"total time {row['time_total']:.2f}s")
+    with open(f"run_{row['instance']}_{date.today()}.txt", "w") as f:
         f.write("\n".join(out) + "\n")
-    if problem.best_found is not None:
-        RH.write_out_solution(problem, problem.best_found)
-    return problem, construction
-
-
-def run_instance(instance_name: str, reports: dict):
-    """Initializes and solves a single problem instance iteratively."""
-    configure_mip_solver()
-    # 1. Problem Initialization (Assuming external module 'instanceGenerator')
-    if BENCHMARK_MODE:
-        problem = instanceGenerator.readGenerate_benchmark(instance_name, 100)
-    else:
-        problem = instanceGenerator.read_generate_case(
-            DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES
-        )
-
-    # 2. Problem Configuration (Simplified assignment)
-    problem.case_study = False
-    problem.modelStartTime = time.time()
-    problem.initial_report = reports['initial']
-    problem.multi_report = reports['multi']
-    problem.report = reports['main']
-    problem.synch_check = IS_SYNCHRONIZED
-    problem.points_found = []
-    problem.min_relaxed_transfer_num = 0
-    problem.tabu_search_active = TABU_SEARCH_ACTIVE
-
-    # 3. Single solution placeholder
-    final_solution = None
-    before_objective = math.inf
-
-    # 4. Iterative Solver Loop (Using range() is more Pythonic and efficient)
-    for iters in range(1, REP_ITS + 1):
-        problem.its_iter = iters
-
-        # MLD.Solve_by_iterative call (Parameters kept for fidelity)
-        final_solution = MLD.Solve_by_iterative(
-            31 + iters, problem, final_solution, START_CONS, REP_LOCAL_SEARCH,
-            iters * ITER_LOCAL_SEARCH, ITER_ALNS, report_initials=False
-        )
-
-        # Stagnation check
-        change = abs(final_solution.objective - before_objective)
-        if change < 0.01:
-            problem.min_relaxed_transfer_num += 1
-        else:
-            before_objective = final_solution.objective
-
-    # 5. Final Output (Assuming external module 'RH')
-    runtime = time.time() - problem.modelStartTime
-    RH.write_out_solution(problem, final_solution, runtime, len(problem.satellites))
-    RH.plot_found_solutions(problem)
+    with open(problem.report, "a") as f:
+        f.write("\t".join(f"{c}\t{row.get(c, '')}" for c in SUMMARY_COLUMNS) + "\n")
+    write_summary(row)
+    if final is not None:
+        RH.write_out_solution(problem, final)
+    return problem, final, row
 
 
 # --- MAIN EXECUTION ---
 
 if __name__ == "__main__":
-
-    # 0. All outputs go to OUTPUT_DIR (data paths are resolved from the module files)
+    # all outputs go to OUTPUT_DIR (data paths are resolved from the module files)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.chdir(OUTPUT_DIR)
-
-    # 1. Setup Report Files
     reports = {
         'main': create_report_file("report"),
         'initial': create_report_file("initial"),
         'multi': create_report_file("multi")
     }
-
-    # 2. Path check (Original code's logic, kept simple)
-    # path = os.path.dirname(os.path.abspath(__file__))+"/data/dataset"
-    # filenames = next(walk(path), (None, None, []))[2]
-
-    # 3. Run Instances
     for instance_name in INSTANCES_TO_RUN:
-        if STAGE == "initial":
-            run_initial_construction(instance_name, reports)
-        else:
-            run_instance(instance_name, reports)
+        run_instance(instance_name, reports)

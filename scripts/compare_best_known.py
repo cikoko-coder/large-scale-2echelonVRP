@@ -1,4 +1,4 @@
-"""Initial solution (construction, construction + local search) against the best-known solution of
+"""ITS (MultiEchelonPipeline.run_instance) against the best-known solution of
 data/sols, the best-known SEV routes evaluated by the same two-echelon check (two-way DP + water MIP).
 Usage: python scripts/compare_best_known.py c201.txt <output dir>   -> one JSON line"""
 import sys, io, os, contextlib, time, random, json
@@ -6,7 +6,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import MultiEchelonPipeline as P, instanceGenerator, Repair_heuristcs as RH
 name=sys.argv[1]; os.chdir(sys.argv[2])
-P.INITIAL_METHOD="heuristic"; P.CROSS_CHECK_MIP=False
 reports={k:P.create_report_file(k) for k in ("main","initial","multi")}
 RH.ROUTE_CHECK=P.ROUTE_CHECK; RH.REFILL_RULE=P.REFILL_RULE
 
@@ -17,12 +16,12 @@ def figures(p, sol):
                 water=round(sol.travelWater,2), dist=round(street+sol.travelWater,2), obj=round(sol.objective,1))
 
 out={}
-for ls in (0,1):
-    P.LOCAL_SEARCH_INITIAL = bool(ls)
-    t=time.time()
-    with contextlib.redirect_stdout(io.StringIO()):
-        p,_ = P.run_initial_construction(name, reports)
-    out["ls" if ls else "constr"] = dict(figures(p, p.best_found), time=round(time.time()-t,1))
+t=time.time()
+with contextlib.redirect_stdout(io.StringIO()):
+    p, _, row = P.run_instance(name, reports)
+out["its"] = dict(figures(p, p.best_found), time=round(time.time()-t,1),
+                  se=[[row["init_sevs"], row["init_two_way"]], [row["init_ls_sevs"], row["init_ls_two_way"]],
+                      [row["its_sevs"], row["its_two_way"]]], fe_candidates=row["fe_candidates"])
 
 # best known: its SEV routes through the same two-echelon check (transshipments by our DP, water MIP)
 with contextlib.redirect_stdout(io.StringIO()):

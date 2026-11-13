@@ -9,400 +9,377 @@ import Repair_heuristcs as RH
 import local_search as LS
 import SEVs
 BigNumber = 1000000
-#define set up for ALNS operators instead of creating at each time required such as probs, scores, used times and etc.
 
-def Solve_by_decomposition(random_num, problem_instance, nstart = 10, repLS = 5, iterLS = 50, iterALNS = 500):
-    random.seed(random_num+problem_instance.its_iter) 
+# --- ITS (manuscript Section 5, Figure 4) ---------------------------------------------------
+# One call of Solve_by_decomposition is one ITS iteration on the SE level (its_iter = k):
+#   k = 1: Init (multi_start_initial, N_init starts) -> process the pool -> R* = best,
+#          LS(R*) (Local_search_incumbent, R_LS repetitions, N_LS) -> process -> R*
+#   every k: ALNS(R*, N_ALNS) (Solve_by_multi_level_ALNS: MLD destroy + the single repair
+#          RH.k_best_insertion_repair) -> LS on the best ALNS solution -> process the pool -> R*
+# R* = problem.best_SE (multi-trip solution), compared by SE fleet size first, then two-way cost.
+# Diversification falls with k: initial scores S_I = S_R = 10/k and the SA rate p_acc/k; the
+# caller raises N_LS with k. All solutions found are stored (problem.heuristics_solutions);
+# the FE level is optimized afterwards on the min-fleet ones (Optimize_FE).
+# The route-level exact check (SolveFixedSEVRouteMILP) is RH.check_route_transshipments: the
+# two-way refill DP (ROUTE_CHECK = "dp") or the street MIP of the fixed route ("mip").
 
-    problem_instance.customers = [node for node in problem_instance.nodes if node.index>0]
+SA_ACCEPTANCE = 0.05               # p_acc: temperature = p_acc / its_iter * travel cost of the ALNS start
+SCORE_SAME, SCORE_IMPROVING, SCORE_WORSE = 0.1, 1.0, 0.0   # alpha_0, alpha_1, alpha_-1 of eq. (24)
+SCORE_SAME_TOLERANCE = 1.0         # |Delta z| <= 1: insignificant change
+INITIAL_SCORE_DIVERSIFICATION = 10.0   # S_I and S_R at its_iter = 1 (divided by its_iter), S_W = S_N = 1
+REMOVAL_FRACTIONS = [0.05, 0.10, 0.25, 0.35]   # additional removals A, B, C, D (share of the remaining customers)
+REPAIR_OPERATOR = "k_best_insertion"           # the single repair operator (Algorithm 7)
 
-    start_time = time.time()   
-    if problem_instance.best_found is None:
-        construction_two_echelon = multi_start_initial( problem_instance, nstart )       #returns a two-echelon solution    
-        #construction_two_echelon = MathModels.street_problem_MIP(problem_instance, 100, single= None, multiple = None, transfers_in = None)
-        RH.check_found_solutions(problem_instance)
-    
-    
-    construction_two_echelon = problem_instance.best_found
 
-    percentage_imp1, routes1 = Local_search_incumbent(problem_instance, construction_two_echelon, replications = repLS, iters = iterLS) 
-    RH.check_found_solutions(problem_instance)
-    
-    improved_inital_solution = problem_instance.best_found
-    
-    if construction_two_echelon == None:
-        percentage_imp1 = 100
-    else:
-        percentage_imp1 = 100*(improved_inital_solution.travelTotal - construction_two_echelon.travelTotal)/construction_two_echelon.travelTotal
-    #local search
-    solution, time2, incumbent = Solve_by_multi_level_ALNS(problem_instance, improved_inital_solution, max_iterations=iterALNS) 
-    alns_final_solution = problem_instance.best_found
+def solution_key(problem_instance, routes):
+    """(SE fleet size, two-way cost) of a route set: the order used for R* (fleet first)."""
+    two_way = RH.two_way_solution_cost(problem_instance, routes)
+    return (len([r for r in routes if r]), two_way["cost"]), two_way
 
-    if alns_final_solution == None:
-        percentage_imp1 = 100
-    else:
-        percentage_imp2 = 100*(alns_final_solution.travelTotal - improved_inital_solution.travelTotal)/improved_inital_solution.travelTotal
-    
-    percentage_imp2, routes1 = Local_search_incumbent(problem_instance, alns_final_solution, replications = repLS, iters = iterLS) 
-    RH.check_found_solutions(problem_instance)  
-    final_solution = problem_instance.best_found
 
-    if final_solution == None:
-        percentage_imp1 = 100
-    else:
-        percentage_imp3 = 100*(final_solution.travelTotal - alns_final_solution.travelTotal)/alns_final_solution.travelTotal
-    
-    
-    problem = problem_instance
-    
-    with open(problem.report , 'a') as file:
-            file.write("problem demand set\t"+ str(problem.name) + "\t")
-            file.write("number of customers\t"+ str(len(problem.customers)) + "\t")
-            file.write("run time secs\t"+ str(time.time() - start_time) + "\t")
-            #file.write("FINAL SOLUTION STATS relax, alns, and two echelon objective\t"+ str(relaxed_cost_final)+ "\t"+ str(relaxed_cost_alns)+ "\t"+ str(final_solution.objective)+ "\t") 
-            file.write("is feasible\t"+ str(final_solution.is_feasible)+ "\t") 
-            file.write("nSEVs\t"+ str(final_solution.nSEVs)+ "\t") 
-            file.write("nFEVs\t"+ str(final_solution.nFEVs)+ "\t") 
-            file.write("total travel\t"+ str(final_solution.travelStreet +final_solution.travelWater)+ "\t") 
-            file.write("street travel\t"+ str(final_solution.travelStreet)+ "\t") 
-            file.write("water travel\t"+ str(final_solution.travelWater)+ "\t" ) 
-            file.write("nof transfers\t"+ str(len(final_solution.transshipments))+ "\t") 
-    
-    final_solution = alns_final_solution
-    with open(problem.report , 'a') as file:
-            file.write("improvement final LS and alns solution\t"+ str(percentage_imp3) + "\t")
-            file.write("is feasible\t"+ str(final_solution.is_feasible)+ "\t") 
-            file.write("nSEVs\t"+ str(final_solution.nSEVs)+ "\t") 
-            file.write("nFEVs\t"+ str(final_solution.nFEVs)+ "\t") 
-            file.write("total travel\t"+ str(final_solution.travelStreet +final_solution.travelWater)+ "\t") 
-            file.write("street travel\t"+ str(final_solution.travelStreet)+ "\t") 
-            file.write("water travel\t"+ str(final_solution.travelWater)+ "\t" ) 
-            file.write("nof transfers\t"+ str(len(final_solution.transshipments))+ "\t") 
-    final_solution = improved_inital_solution
-    with open(problem.report , 'a') as file:
-            file.write("improvement in ALNS and LS solution\t"+ str(percentage_imp2) + "\t")
-            file.write("is feasible\t"+ str(final_solution.is_feasible)+ "\t") 
-            file.write("nSEVs\t"+ str(final_solution.nSEVs)+ "\t") 
-            file.write("nFEVs\t"+ str(final_solution.nFEVs)+ "\t") 
-            file.write("total travel\t"+ str(final_solution.travelStreet +final_solution.travelWater)+ "\t") 
-            file.write("street travel\t"+ str(final_solution.travelStreet)+ "\t") 
-            file.write("water travel\t"+ str(final_solution.travelWater)+ "\t" ) 
-            file.write("nof transfers\t"+ str(len(final_solution.transshipments))+ "\t"  ) 
-    final_solution = construction_two_echelon
-    with open(problem.report , 'a') as file:
-            file.write("improvement first LS and inital solution \t"+ str(percentage_imp1) + "\t")
-            file.write("is feasible\t"+ str(final_solution.is_feasible)+ "\t") 
-            file.write("nSEVs\t"+ str(final_solution.nSEVs)+ "\t") 
-            file.write("nFEVs\t"+ str(final_solution.nFEVs)+ "\t") 
-            file.write("total travel\t"+ str(final_solution.travelStreet +final_solution.travelWater)+ "\t") 
-            file.write("street travel\t"+ str(final_solution.travelStreet)+ "\t") 
-            file.write("water travel\t"+ str(final_solution.travelWater)+ "\t" ) 
-            file.write("nof transfers\t"+ str(len(final_solution.transshipments))+ "\t"  + "\n") 
+def travel_cost(problem_instance, two_way):
+    """Travel part of a two-way cost: c^s (distance + detours), without vehicle and trip costs."""
+    return two_way["cost"] - problem_instance.cost_vehicle_use*two_way["n_vehicles"] \
+        - problem_instance.trip_unit_cost*two_way["n_trips"]
 
-    return problem_instance.best_found
 
-def Solve_by_multi_level_ALNS(problem_instance, start_solution, max_iterations=1500):    
-    start = time.time()
+def set_best_SE(problem_instance, routes, phase):
+    """Make routes the incumbent R* if better (fleet, then two-way cost); returns True if updated."""
+    if routes is None or sum(len(r) for r in routes) != len(problem_instance.customers):
+        return False
+    key, two_way = solution_key(problem_instance, routes)
+    if not two_way["feasible"]:
+        return False
+    best = getattr(problem_instance, "best_SE_key", None)
+    if best is not None and key >= (best[0], best[1] - LS.MIN_GAIN):
+        return False
+    solution = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
+    if not solution.is_feasible:
+        return False
+    set_two_way_cost(problem_instance, solution)
+    problem_instance.best_SE = solution
+    problem_instance.best_SE_key = (solution.nSEVs, solution.two_way_cost)
+    problem_instance.best_SE_phase = phase
+    return True
 
-    if type(start_solution) != list: # a two-echelon object
-        current_solution = [copy.deepcopy(route.sequence) for route in start_solution.routes_sevs]
-    else:        
-        current_solution = copy.deepcopy(start_solution)
 
-        
-    generate_operators_statistics(problem_instance, max_iterations)
-    pool = []
-    temperature = problem_instance.cost_vehicle_use
-    iteration = 0
-    incumbent_iteration = 0
+def process_neighborhood(problem_instance, fleet_max = None):
+    """
+    Algorithm 1 ProcessNeighborhood on the solutions of problem.heuristics_solutions not processed
+    before (the pool of the last phase; RH.add_to_feasible_solution re-sorts the list, so they are
+    recognized by their sequences): keep those with at most fleet_max routes, update the tabu list by
+    the route-level exact check of every route (UpdateTabuList, Algorithm 3) and repair the schedules
+    with infeasible routes (RepairInfeasibleSchedules, Algorithm 2: check_MVRP_solution removes the
+    customers leading to infeasibility and reinserts them by the repair, the repaired schedule is
+    stored). :return: list of multi-trip feasible route sets
+    """
+    processed = problem_instance.__dict__.setdefault("processed_solutions", set())
+    feasible = []
+    for sequences in list(problem_instance.heuristics_solutions):
+        key = tuple(sorted(tuple(sequence) for sequence in sequences))
+        if key in processed:
+            continue
+        processed.add(key)
+        if fleet_max is not None and len(sequences) > fleet_max:
+            continue
+        routes = [[problem_instance.nodes[x] for x in sequence] for sequence in sequences]
+        solution = RH.check_MVRP_solution(problem_instance, routes)
+        if solution.is_feasible:
+            feasible.append([list(route.sequence) for route in solution.routes_sevs])
+    return feasible
 
-    feasible_solutions = {}
-    feasible_solutions[iteration] = (len(current_solution), problem_instance.best_cost, current_solution)
-    nof_accepted_worse_solutions = 0
-    problem_instance.accepted_solutions = []   
-    
-    nonimproving = 0
-    
-    integrated_start= RH.check_feasibility(problem_instance, current_solution)
-    
-    deviations = []
-    print("------------------start solution----------------"+"\t, fleet\t"+str(len(current_solution))+"\t, cost street\t"+str(integrated_start.travelStreet))
-                
-    while iteration < max_iterations - 1:   
-        feasibility = True 
-        iteration += 1   
 
-        solution_start = copy.deepcopy(current_solution)
+def Solve_by_decomposition(random_num, problem_instance, nstart = 5, repLS = 5, iterLS = 500, iterALNS = 500):
+    """
+    One ITS iteration (problem_instance.its_iter = k) on the SE level, see the outline above.
+    Appends a record of the phases to problem_instance.its_log. :return: R* (problem.best_SE)
+    """
+    random.seed(random_num + problem_instance.its_iter)
+    problem_instance.customers = [node for node in problem_instance.nodes if node.index > 0]
+    log = {"its_iter": problem_instance.its_iter}
+    start_time = time.time()
 
-        roulette_type, removal_type, removal_number, repair_type = Select_operators(problem_instance)    
-    
-        partial_solution, pool = multi_direction_random_destroy_repair(problem_instance, current_solution, roulette_type, removal_type, removal_number)
+    if getattr(problem_instance, "best_SE", None) is None:
+        # Init: N_init starts, Algorithm 4 (the repaired schedules are stored)
+        t = time.time()
+        multi_start_initial(problem_instance, nstart)
+        for routes in process_neighborhood(problem_instance):
+            set_best_SE(problem_instance, routes, "init")
+        log["init"] = {"time": time.time() - t, "key": problem_instance.best_SE_key}
+        # LS on the cheapest initial solution
+        t = time.time()
+        _, routes = Local_search_incumbent(problem_instance, problem_instance.best_SE, repLS, iterLS)
+        log["init_ls_report"] = problem_instance.local_search_report
+        for found in [routes] + process_neighborhood(problem_instance):
+            set_best_SE(problem_instance, found, "init+ls")
+        log["init_ls"] = {"time": time.time() - t, "key": problem_instance.best_SE_key}
 
-        current_solution, pool = RH.k_best_insertion_repair(problem_instance, partial_solution, pool)
-        score = calculate_score(problem_instance, solution_start, current_solution)
-        update_scores(problem_instance,roulette_type, removal_type, removal_number, repair_type, score)
+    # ALNS from R*
+    t = time.time()
+    stored = len(problem_instance.heuristics_solutions)
+    best_alns, alns_report = Solve_by_multi_level_ALNS(problem_instance, problem_instance.best_SE, iterALNS)
+    log["alns_report"] = alns_report
+    log["alns"] = {"time": time.time() - t, "stored": len(problem_instance.heuristics_solutions) - stored}
+    log["alns_best_key"] = alns_report["best_key"]
+    # LS on the best ALNS solution
+    t = time.time()
+    _, routes = Local_search_incumbent(problem_instance, best_alns, repLS, iterLS)
+    log["ls_report"] = problem_instance.local_search_report
+    fleet_max = problem_instance.best_SE_key[0]
+    candidates = [routes, best_alns] + process_neighborhood(problem_instance, fleet_max)
+    for found in candidates:
+        set_best_SE(problem_instance, found, f"its {problem_instance.its_iter}")
+    log["ls"] = {"time": time.time() - t, "key": problem_instance.best_SE_key}
+    log["time"] = time.time() - start_time
+    log["tabu_list"] = len(problem_instance.tabu_list)
+    problem_instance.its_log = getattr(problem_instance, "its_log", []) + [log]
+    return problem_instance.best_SE
 
-        
-        if feasibility == False:
-            current_solution = copy.deepcopy(solution_start)
-            print( )
-            with open(problem_instance.initial_report, 'a') as file:
-                file.write("iteration " + str(iteration)+"\t------------------infeasible solution regarding MVRP----------------"+"\n")
-    
-            continue            
-                
-        #print in single line for better readability
-        #print("iteration ", iteration, "\tVRP cost ", vrp_cost, "\tforward ", forward_cost, "\tbackward ", backward_cost, "\toptimal ", optimal_cost)
-        with open(problem_instance.initial_report, 'a') as file:
-            file.write("iteration " + str(iteration) +"\tfleet: " + str(len(current_solution)) + "\n")
 
-                      
-        integrated_solution = RH.check_feasibility(problem_instance,  current_solution)
+def Solve_by_multi_level_ALNS(problem_instance, start_solution, max_iterations = 500):
+    """
+    Algorithm 6: in each iteration an MLD destroy (multi_direction_random_destroy_repair with the
+    three levels chosen by Select_operators), the single repair (RH.k_best_insertion_repair,
+    Algorithm 7), the score update of every level (eq. 24) and the simulated annealing acceptance
+    with the aspiration criterion on the SE fleet size. The temperature is fixed during the run at
+    SA_ACCEPTANCE / its_iter times the travel cost of the start. Every complete solution of the repair
+    is stored by the repair (S_ALNS). Costs are two-way costs (RH.two_way_solution_cost).
+    :return: (best route set: fleet first, then cost; report dict)
+    """
+    current = _routes_of(start_solution)
+    generate_operators_statistics(problem_instance)
+    current_key, current_two_way = solution_key(problem_instance, current)
+    best, best_key = current, current_key
+    best_fleet = current_key[0]
+    temperature = max(1e-6, SA_ACCEPTANCE/problem_instance.its_iter*travel_cost(problem_instance, current_two_way))
+    report = {"start_key": current_key, "temperature": temperature, "iterations": 0, "accepted_improving": 0,
+              "accepted_worse": 0, "aspiration": 0, "rejected": 0, "infeasible": 0, "best_iteration": 0}
+    for iteration in range(1, max_iterations + 1):
+        report["iterations"] = iteration
+        roulette_type, removal_type, removal_number, repair_type = Select_operators(problem_instance)
+        partial_solution, pool = multi_direction_random_destroy_repair(problem_instance, current, roulette_type,
+                                                                       removal_type, removal_number)
+        new_solution, pool = RH.k_best_insertion_repair(problem_instance, partial_solution, pool)
+        new_key, new_two_way = solution_key(problem_instance, new_solution)
+        if not new_two_way["feasible"]:
+            update_scores(problem_instance, roulette_type, removal_type, removal_number, repair_type, SCORE_WORSE)
+            report["infeasible"] += 1
+            continue
+        score = calculate_score(current_key[1], new_key[1])
+        update_scores(problem_instance, roulette_type, removal_type, removal_number, repair_type, score)
 
-        if len(pool) == 0 and integrated_solution.is_feasible and len(current_solution) <= len(solution_start):
-            if type(current_solution) != list: # a two-echelon object
-                current_solution = [copy.deepcopy(route.sequence) for route in integrated_solution.routes_sevs]         
-                        
-            cost_VRP_start = integrated_start.travelStreet# sum(RH.is_route_feasible(problem_instance, item)[4] for item in solution_start)
-            cost_VRP_new = integrated_solution.travelStreet #sum(RH.is_route_feasible(problem_instance, item)[4] for item in current_solution)
-
-            deviations.insert(0,abs(cost_VRP_new - cost_VRP_start))
-
-            feasible_solutions[iteration] = (len(current_solution), cost_VRP_new, current_solution)
-            
-            print("feasible solution found at \t"+str(iteration)+"\twith cost\t"+str(cost_VRP_new)+"\t, fleet\t"+str(len(current_solution))+"\t, cost street\t"+str(integrated_solution.travelStreet))
-           
-            
-            if len(current_solution) < len(solution_start):
-                integrated_start = integrated_solution
-                print("---------ASPIRATION---"+"\t, fleet\t"+str(len(current_solution))+"\t, cost street\t"+str(integrated_solution.travelStreet))
-                problem_instance.accepted_solutions.append([cost_VRP_start, cost_VRP_new, current_solution, integrated_solution])
-            elif len(current_solution) > len(solution_start)  or not simulated_annealing_acceptance(cost_VRP_new,cost_VRP_start, problem_instance):
-                current_solution = copy.deepcopy(solution_start)
-            else:
-                print("------------------ACCEPTED----------------"+"\t, fleet\t"+str(len(current_solution))+"\t, cost street\t"+str(integrated_solution.travelStreet))
-                integrated_start = integrated_solution
-                nof_accepted_worse_solutions += 1
-                problem_instance.accepted_solutions.append([cost_VRP_start, cost_VRP_new, current_solution, integrated_solution])
-            
-            if nonimproving > 500:
-                break
+        if new_key[0] < best_fleet:                               # aspiration: fewer SEVs than ever
+            accept = True
+            best_fleet = new_key[0]
+            report["aspiration"] += 1
+        elif new_key[0] > current_key[0]:
+            accept = False
+        elif new_key[1] < current_key[1]:
+            accept = True
+            report["accepted_improving"] += 1
         else:
-            current_solution = copy.deepcopy(solution_start)
+            accept = simulated_annealing_acceptance(new_key[1], current_key[1], temperature)
+            report["accepted_worse"] += accept
+        if not accept:
+            report["rejected"] += 1
+            continue
+        current, current_key = [list(route) for route in new_solution], new_key
+        if current_key < best_key:
+            best, best_key = current, current_key
+            report["best_iteration"] = iteration
+    report["best_key"] = best_key
+    report["scores"] = {
+        "roulette": dict(zip(problem_instance.operators_roulette_selection_type, problem_instance.scores_roulette_selection_type)),
+        "removal": dict(zip(problem_instance.operators_removal_type, problem_instance.scores_removal_type)),
+        "size": dict(zip(problem_instance.operators_removal_number, problem_instance.scores_removal_number))}
+    report["used"] = {
+        "roulette": dict(zip(problem_instance.operators_roulette_selection_type, problem_instance.nof_used_roulette_selection_type)),
+        "removal": dict(zip(problem_instance.operators_removal_type, problem_instance.nof_used_removal_type)),
+        "size": dict(zip(problem_instance.operators_removal_number, problem_instance.nof_used_removal_number))}
+    return best, report
 
-    
-    problem_instance.accepted_solutions.sort(key = lambda x: len(x[2]))
-    problem_instance.accepted_solutions.sort(key = lambda x: x[1])
-    
-    if len(problem_instance.accepted_solutions) > 0:
-        best_integrated_solution = problem_instance.accepted_solutions[0][3]
-    else:
-        best_integrated_solution = integrated_start
-    #best_integrated_solution = problem_instance.accepted_solutions[0][2]
 
-    return best_integrated_solution, time.time() - start, incumbent_iteration
+def simulated_annealing_acceptance(new_cost, current_cost, temperature):
+    """Accept a non-improving solution with probability exp(-(new - current) / temperature)."""
+    change = new_cost - current_cost
+    if change <= 0:
+        return True
+    return random.random() < math.exp(-change/temperature)
 
-def simulated_annealing_acceptance(current_solution, solution_start, problem_instance):
-    change = round(current_solution - solution_start,1)
-    
-    temperature = (solution_start)*(problem_instance.SAA_rate / problem_instance.its_iter )
-    #if problem_instance.best_found is not None: 
-    #    temperature = (problem_instance.best_found.travelStreet)*problem_instance.SAA_rate#(1 - iteration/max_iterations)    
 
-    probability = math.exp(-change / temperature)
-
-    return random.random() < probability
-   
 def multi_direction_random_destroy_repair(problem_instance, solution, roulette_type, removal_type, removal_number):
-    
+    """
+    MLD destroy (three levels): roulette_type "equal" (identical, I) or "weighted" (W); seed
+    removal of a whole route ("route", R) or one customer ("node", N), under W biased to routes with
+    a high cost per customer / customers with a high removal saving; additional removal of
+    removal_number of the remaining customers, under W biased to customers close to the removed ones.
+    :return: (partial solution, removed customers in removal order)
+    """
     pool = []
-    new_solution = [copy.deepcopy(route) for route in solution]  # Create a copy of the original solution
-    
-    customers_to_select = []
-    [customers_to_select.extend(route) for route in new_solution]  #node objects in routes are added, no pointer needed
-#region destroy
-    if removal_type == "route" and len(new_solution) != 1:        
+    new_solution = [list(route) for route in solution]
+    customers_to_select = [node for route in new_solution for node in route]
+
+    # level 2: seed removal
+    if removal_type == "route" and len(new_solution) > 1:
         if roulette_type == "equal":
-            weights = [1 for route in new_solution]
+            weights = [1 for _ in new_solution]
         else:
-            #weights = [float(RH.is_route_feasible(problem_instance, route)[4]/len(route)) for route in new_solution]
-            weights = [float(1/len(route)) for route in new_solution]
-        route_removed = random.choices(new_solution, weights=weights, k=1)[0]
-        pool.extend(route_removed) 
+            weights = get_weights_for_route_removal(problem_instance, new_solution)
+        route_removed = random.choices(new_solution, weights = weights, k = 1)[0]
+        pool.extend(route_removed)
         new_solution.remove(route_removed)
-        [customers_to_select.remove(node) for node in route_removed]
-    else:
-        if len(customers_to_select) > 1:
-            if roulette_type == "equal":
-                weights = [1 for _ in range(len(customers_to_select))]
-            else:
-                weights = get_weights_for_node_removal(problem_instance, customers_to_select, new_solution) 
-            node_removed = random.choices(customers_to_select, weights=weights, k=1)[0]
-            pool.append(node_removed)
-            customers_to_select.remove(node_removed)
-
-    
-    #remove customers
-    num_customers_to_remove =  int(len(customers_to_select)  * removal_number)
-    num_customers_to_remove = max(num_customers_to_remove, 1)
-
-    if roulette_type == "equal":
-        weights = [1 for _ in range(len(customers_to_select))]
-    else:
-        weights = get_weights_for_nodes_removal(customers_to_select, pool) 
-
-    #do it without replications
-    for _ in range(num_customers_to_remove): 
-        if len(customers_to_select) == 1: #leave at least one customer in the remaining routes
-            break
-        node_removed = random.choices(customers_to_select, weights=weights, k=1)[0]
-        pool.append(node_removed)
-
-        index_removed = customers_to_select.index(node_removed)   
-        customers_to_select.remove(node_removed)   
-        if roulette_type == "equal":      
-            weights.remove(weights[index_removed])
+        customers_to_select = [node for node in customers_to_select if node not in route_removed]
+    elif len(customers_to_select) > 1:
+        if roulette_type == "equal":
+            weights = [1 for _ in customers_to_select]
         else:
-            weights = get_weights_for_nodes_removal(customers_to_select, pool)        #update new weights since a customer updates the pool
-            
-            #re-updating pool each time after an item is added might reduce the chance of inserting the initiallyu removed ones but cretaes a local neighbourhood
-            #alternative is just to remove the node, no uodate on the weights
-    #remove customers
+            weights = get_weights_for_node_removal(problem_instance, customers_to_select, new_solution)
+        node_removed = random.choices(customers_to_select, weights = weights, k = 1)[0]
+        pool.append(node_removed)
+        customers_to_select.remove(node_removed)
 
-    #check the pointers of the nodes, missing a customer in removal part
-    routes_new = []
-    for route in new_solution:
-        updated_route = [node for node in route if node not in pool]
-        routes_new.append(updated_route)
-    
-    new_solution = [route for route in routes_new if route] 
-    #check the operation
-    x = 0
-    for route in new_solution:
-        x+=len(route) 
-    if x + len(pool) != len(problem_instance.customers) :
-        print(" more nodes are requested than customers")   
-        #endregion  
-    
+    # level 3: additional removals, a share of the remaining customers
+    num_customers_to_remove = max(int(len(customers_to_select)*removal_number), 1)
+    for _ in range(num_customers_to_remove):
+        if len(customers_to_select) <= 1:  # leave at least one customer in the remaining routes
+            break
+        if roulette_type == "equal":
+            weights = [1 for _ in customers_to_select]
+        else:
+            weights = get_weights_for_nodes_removal(customers_to_select, pool)
+        node_removed = random.choices(customers_to_select, weights = weights, k = 1)[0]
+        pool.append(node_removed)
+        customers_to_select.remove(node_removed)
+
+    removed = set(node.index for node in pool)
+    new_solution = [[node for node in route if node.index not in removed] for route in new_solution]
+    new_solution = [route for route in new_solution if route]
+    assert sum(len(route) for route in new_solution) + len(pool) == sum(len(route) for route in solution)
     return new_solution, pool
+
+
 def generate_operators_statistics(problem_instance, destroy_in = None):
+    """Operators and initial scores of the MLD levels (manuscript Section 6.1): S_I = S_R =
+    INITIAL_SCORE_DIVERSIFICATION / its_iter, S_W = S_N = 1, every neighbour size 1; one repair."""
+    k = problem_instance.its_iter
     problem_instance.selection_counts = [1]*len(problem_instance.customers)
-    problem_instance.selection_counts.insert(0, 0) #history based removal
-    
-    #roulette selection operators
+    problem_instance.selection_counts.insert(0, 0)
+
     problem_instance.operators_roulette_selection_type = ["equal", "weighted"]
-    problem_instance.scores_roulette_selection_type = [1]*len(problem_instance.operators_roulette_selection_type)
-    problem_instance.scores_roulette_selection_type[0] = (10 / problem_instance.its_iter )*(problem_instance.scores_roulette_selection_type[1])
-    problem_instance.nof_used_roulette_selection_type =  [0]*len(problem_instance.operators_roulette_selection_type)    
-    problem_instance.nof_success_roulette_selection_type =  [0]*len(problem_instance.operators_roulette_selection_type)
+    problem_instance.scores_roulette_selection_type = [INITIAL_SCORE_DIVERSIFICATION/k, 1.0]
+    problem_instance.nof_used_roulette_selection_type = [0, 0]
+    problem_instance.nof_success_roulette_selection_type = [0, 0]
 
-    #removal type
     problem_instance.operators_removal_type = ["route", "node"]
-    problem_instance.scores_removal_type = [1]*len(problem_instance.operators_removal_type)
-    problem_instance.scores_removal_type[0] = (10 / problem_instance.its_iter)*(problem_instance.scores_removal_type[1]) #warm up
-    problem_instance.nof_used_removal_type =  [0]*len(problem_instance.operators_removal_type)
-    problem_instance.nof_success_removal_type =  [0]*len(problem_instance.operators_removal_type)
+    problem_instance.scores_removal_type = [INITIAL_SCORE_DIVERSIFICATION/k, 1.0]
+    problem_instance.nof_used_removal_type = [0, 0]
+    problem_instance.nof_success_removal_type = [0, 0]
 
-    removal_types = [0.05, 0.15, 0.25, 0.35]
-    #if destroy_in is not None:
-    #    removal_types = [destroy_in]
-    #number of removals 
-    problem_instance.operators_removal_number = removal_types#[ (0.05*i) + 0.05 for i in range(problem_instance.nof_destroy_operators)] 
-    problem_instance.scores_removal_number  = [1 ]*len(problem_instance.operators_removal_number) #generate weights same size as operators
-    problem_instance.nof_used_removal_number = [0]*len(problem_instance.operators_removal_number)
-    problem_instance.nof_success_removal_number = [0]*len(problem_instance.operators_removal_number)
+    problem_instance.operators_removal_number = list(REMOVAL_FRACTIONS)
+    problem_instance.scores_removal_number = [1.0]*len(REMOVAL_FRACTIONS)
+    problem_instance.nof_used_removal_number = [0]*len(REMOVAL_FRACTIONS)
+    problem_instance.nof_success_removal_number = [0]*len(REMOVAL_FRACTIONS)
 
-    #repair_operators - only single repair operator used 
-    repair_types = [1,2,3,4]
-    problem_instance.operators_repair_type = repair_types # [ i+1 for i in range(problem_instance.nof_destroy_operators)]     
-    problem_instance.scores_repair_type  = [1 ]*len(problem_instance.operators_repair_type) #generate weights same size as operators
-    problem_instance.nof_used_repair_type = [0]*len(problem_instance.operators_repair_type)
-    problem_instance.nof_success_repair_type = [0]*len(problem_instance.operators_repair_type)
+    problem_instance.operators_repair_type = [REPAIR_OPERATOR]
+    problem_instance.scores_repair_type = [1.0]
+    problem_instance.nof_used_repair_type = [0]
+    problem_instance.nof_success_repair_type = [0]
     return
 
+
 def Select_operators(problem_instance):
-    #select randomly    
-    roulette_type = random.choices(problem_instance.operators_roulette_selection_type, problem_instance.scores_roulette_selection_type, k=1)[0] 
-    removal_type = random.choices(problem_instance.operators_removal_type, problem_instance.scores_removal_type, k=1)[0] 
-    removal_number = random.choices(problem_instance.operators_removal_number, problem_instance.scores_removal_number, k=1)[0] 
-    repair_type = random.choices(problem_instance.operators_repair_type, problem_instance.scores_repair_type, k=1)[0] 
+    """Roulette-wheel choice of each MLD level by its scores (the repair is the single operator)."""
+    roulette_type = random.choices(problem_instance.operators_roulette_selection_type, problem_instance.scores_roulette_selection_type, k=1)[0]
+    removal_type = random.choices(problem_instance.operators_removal_type, problem_instance.scores_removal_type, k=1)[0]
+    removal_number = random.choices(problem_instance.operators_removal_number, problem_instance.scores_removal_number, k=1)[0]
+    repair_type = problem_instance.operators_repair_type[0]
 
-    #update use
-    problem_instance.nof_used_roulette_selection_type[problem_instance.operators_roulette_selection_type.index(roulette_type)] +=1
-    problem_instance.nof_used_removal_type[problem_instance.operators_removal_type.index(removal_type)] +=1
-    problem_instance.nof_used_removal_number[problem_instance.operators_removal_number.index(removal_number)] +=1
-    problem_instance.nof_used_repair_type[problem_instance.operators_repair_type.index(repair_type)] +=1
-
+    problem_instance.nof_used_roulette_selection_type[problem_instance.operators_roulette_selection_type.index(roulette_type)] += 1
+    problem_instance.nof_used_removal_type[problem_instance.operators_removal_type.index(removal_type)] += 1
+    problem_instance.nof_used_removal_number[problem_instance.operators_removal_number.index(removal_number)] += 1
+    problem_instance.nof_used_repair_type[0] += 1
     return roulette_type, removal_type, removal_number, repair_type
-def calculate_score(problem_instance, solution, updated_solution):
-    score = 0
-    energy_old = sum(RH.is_route_feasible(problem_instance, route)[2] for route in solution)
-    energy_new = sum(RH.is_route_feasible(problem_instance, route)[2] for route in updated_solution)
 
-    if abs(energy_new  - energy_old) < 1:
-        score = 0.2
-    elif energy_new > energy_old :
-        score = 0
-    else:
-        score = 1
 
-    return score
+def calculate_score(cost_old, cost_new):
+    """Eq. (24): alpha_0 for an insignificant change (|Delta z| <= 1), alpha_1 if improving,
+    alpha_-1 if deteriorating (two-way cost)."""
+    if abs(cost_new - cost_old) <= SCORE_SAME_TOLERANCE:
+        return SCORE_SAME
+    return SCORE_IMPROVING if cost_new < cost_old else SCORE_WORSE
+
 
 def update_scores(problem_instance, roulette_type, removal_type, removal_number, repair_type, score):
     problem_instance.scores_roulette_selection_type[problem_instance.operators_roulette_selection_type.index(roulette_type)] += score
     problem_instance.scores_removal_type[problem_instance.operators_removal_type.index(removal_type)] += score
     problem_instance.scores_removal_number[problem_instance.operators_removal_number.index(removal_number)] += score
     problem_instance.scores_repair_type[problem_instance.operators_repair_type.index(repair_type)] += score
-
     if score > 0:
-        problem_instance.nof_success_roulette_selection_type[problem_instance.operators_roulette_selection_type.index(roulette_type)] +=1
-        problem_instance.nof_success_removal_type[problem_instance.operators_removal_type.index(removal_type)] +=1
-        problem_instance.nof_success_removal_number[problem_instance.operators_removal_number.index(removal_number)] +=1
-        problem_instance.nof_success_repair_type[problem_instance.operators_repair_type.index(repair_type)] +=1
+        problem_instance.nof_success_roulette_selection_type[problem_instance.operators_roulette_selection_type.index(roulette_type)] += 1
+        problem_instance.nof_success_removal_type[problem_instance.operators_removal_type.index(removal_type)] += 1
+        problem_instance.nof_success_removal_number[problem_instance.operators_removal_number.index(removal_number)] += 1
+        problem_instance.nof_success_repair_type[problem_instance.operators_repair_type.index(repair_type)] += 1
     return
-def get_weights_for_removal(problem_instance, customers_to_select, pool):
-   
-    if pool:
-        centerX = sum(node.xcoordinate for node in pool)/ len(pool)
-        centerY = sum(node.ycoordinate for node in pool)/ len(pool)        
-    else:
-        centerX = sum(node.xcoordinate for node in problem_instance.customer_nodes)/ len(problem_instance.customer_nodes)
-        centerY = sum(node.ycoordinate for node in problem_instance.customer_nodes)/ len(problem_instance.customer_nodes)
-        centroid = min(problem_instance.customer_nodes, key=lambda x: math.sqrt((x.xcoordinate - centerX)**2 + (x.ycoordinate - centerY)**2))
 
-    
-    weights = [math.sqrt((x.xcoordinate - centerX)**2 + (x.ycoordinate - centerY)**2) for x in customers_to_select]
-    weights = [ (x / sum(weights)) for x in weights]
+
+def get_weights_for_route_removal(problem_instance, solution):
+    """Weighted route removal: two-way cost per customer (vehicle cost included, so small and
+    expensive routes are removed more likely)."""
+    weights = []
+    for route in solution:
+        plan = RH.two_way_transshipment_checking(problem_instance, route)
+        cost = plan["cost"] if plan["feasible"] else BigNumber
+        weights.append(cost/len(route))
     return weights
+
+
 def get_weights_for_node_removal(problem_instance, customers_to_select, solution):
-    RH.update_intervals(problem_instance, solution)
+    """Weighted node removal: distance saving of removing the customer from its route,
+    d(prev, u) + d(u, next) - d(prev, next) (garage = 0), plus a small floor."""
+    d = problem_instance.distance_matrix
+    saving = {}
+    for route in solution:
+        for pos, node in enumerate(route):
+            a = route[pos - 1].index if pos > 0 else 0
+            b = route[pos + 1].index if pos + 1 < len(route) else 0
+            saving[node.index] = d[a][node.index] + d[node.index][b] - d[a][b]
+    return [max(saving[node.index], 0.0) + 1e-3 for node in customers_to_select]
+
+
+def get_weights_for_nodes_removal(customers_to_select, pool):
+    """Weighted additional removal: inverse mean Euclidean distance to the removed customers."""
     weights = []
-
-    indices = [[node.index for node in route] for route in solution] #required since the copies do not match with the original nodes
-        
-    for node in customers_to_select:
-        route_index = indices.index([x for x in indices if node.index in x][0])
-        route = solution[route_index]
-        index = route.index([node_cur for node_cur in route if node_cur.index == node.index][0])
-
-        #weights.append(problem_instance.latest_times_feasible[node.index] - problem_instance.arrivals[node.index])    
-        if index == len(route) - 1:
-            weights.append(problem_instance.distance_matrix[node.index][0])
-        else:
-            weights.append(problem_instance.distance_matrix[node.index][route[index + 1].index])
-
-    return weights
-def get_weights_for_nodes_removal(customers_to_select, pool): #ordered by the customers given lists
-    weights = []
-
     for node_p in customers_to_select:
-        weights.append(sum((math.sqrt((node_p.xcoordinate - node_s.xcoordinate)**2 + (node_p.ycoordinate - node_s.ycoordinate)**2)  for node_s in pool ))/len(pool))
-        
-    weights = [ 1/x for x in weights]
-    sumx = sum(weights)
-    weights = [x/sumx for x in weights]
-    
-    return weights
+        mean = sum(math.sqrt((node_p.xcoordinate - node_s.xcoordinate)**2 + (node_p.ycoordinate - node_s.ycoordinate)**2)
+                   for node_s in pool)/len(pool)
+        weights.append(1/max(mean, 1e-6))
+    total = sum(weights)
+    return [x/total for x in weights]
+
+
+def Optimize_FE(problem_instance, max_candidates = None):
+    """
+    Algorithm 8 on S*_SE: the stored route sets with the fewest SEVs (ranked by two-way cost,
+    at most max_candidates) go through RH.check_found_solutions: multi-trip / MVRP check, the FE
+    routing MILP (FEVmodels.water_problem_MIP) and the satellite-removal consolidation, repeated while
+    it improves. :return: (problem.best_found, number of SE solutions sent to the FE level)
+    """
+    ranked = []
+    for sequences in problem_instance.heuristics_solutions:
+        routes = [[problem_instance.nodes[x] for x in sequence] for sequence in sequences]
+        key, two_way = solution_key(problem_instance, routes)
+        if two_way["feasible"]:
+            ranked.append((key, sequences))
+    if not ranked:
+        return problem_instance.best_found, 0
+    fewest = min(key[0] for key, _ in ranked)
+    ranked = sorted([x for x in ranked if x[0][0] == fewest], key = lambda x: x[0])
+    if max_candidates is not None:
+        ranked = ranked[:max_candidates]
+    problem_instance.heuristics_solutions = [sequences for _, sequences in ranked]
+    RH.check_found_solutions(problem_instance)
+    return problem_instance.best_found, len(ranked)
+
 # Local search: the two operators (relocate, 2-opt* = tail exchange, the revised one-point
 # crossover) live in local_search.py; every move is decided by the two-way check with the
 # forward / backward time screen, the cost lower bound, granular neighbour lists and a route cache.
@@ -525,33 +502,6 @@ def multi_start_initial(problem_instance, nstart = 5, report_initials = False, l
         return feasible[0]
     return checked[0]
 
-def mip_initial_solution(problem_instance, timelimit, warm_start = None, customers = None, output = False):
-    """
-    Initial solution by the free street routing MIP (MathModels.street_routing_MIP): the model
-    routes the customers, places the transshipments and chooses the satellites in one go,
-    objective = vehicles + distance + detours + transshipments (optimal for the street problem
-    at gap 0; with a time limit the incumbent). warm_start = routes of a heuristic solution;
-    None (the free initializer) passes no routes, the MIP starts from scratch.
-    The routes are stored in problem_instance.heuristics_solutions (complete solutions only)
-    and checked as a multi-trip solution (check_MVRP_solution, transshipments by the DP).
-    The cost of the solution is decided by the two-way check (RH.two_way_solution_cost of the
-    MVRP routes), not by the MIP objective: result["two_way"] and solution.two_way_cost.
-    :return: (multi-trip solution object or None, MIP result dict)
-    """
-    result = MathModels.street_routing_MIP(problem_instance, timelimit, customers = customers,
-                                           warm_start = warm_start, output = output)
-    result["warm_started"] = bool(warm_start)
-    if not result["feasible"]:
-        return None, result
-    routes = result["routes"]
-    result["two_way_mip_routes"] = RH.two_way_solution_cost(problem_instance, routes)
-    RH.add_to_feasible_solution(problem_instance, routes)
-    solution = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
-    solution.mip_result = result
-    set_two_way_cost(problem_instance, solution)
-    result["two_way"] = solution.two_way
-    return solution, result
-
 def set_two_way_cost(problem_instance, solution):
     """solution.two_way = RH.two_way_solution_cost of its SEV routes, solution.two_way_cost = its cost."""
     if solution is None:
@@ -563,25 +513,6 @@ def set_two_way_cost(problem_instance, solution):
                             "route_costs": [], "route_trips": [], "infeasible_routes": []}
     solution.two_way_cost = solution.two_way["cost"]
     return solution.two_way
-
-def select_initial_by_two_way(problem_instance, candidates):
-    """
-    Pick the initial solution among candidates [(method name, multi-trip solution or None), ...]
-    by the two-way cost: feasible solutions first, then the smallest two-way cost (vehicles +
-    distance + detours + trips with the minimum on-time transshipments). Ties keep the earlier
-    candidate. :return: (method name, solution) or (None, None)
-    """
-    best = (None, None)
-    best_key = None
-    for name, solution in candidates:
-        if solution is None:
-            continue
-        if not hasattr(solution, "two_way"):
-            set_two_way_cost(problem_instance, solution)
-        key = (not (solution.is_feasible and solution.two_way["feasible"]), solution.two_way_cost)
-        if best_key is None or key < best_key:
-            best, best_key = (name, solution), key
-    return best
 
 def get_initial_solution(problem_instance, nof_initializations = 1, read_initials = False):    
 

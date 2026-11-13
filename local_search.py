@@ -340,7 +340,8 @@ def new_stats():
 
 
 def local_search(problem, routes, operators = ("relocate", "two_opt_star"), seed = None,
-                 max_rounds = 20, max_passes = MAX_PASSES, neighbours = NEIGHBOURS, store = True):
+                 max_rounds = 20, max_passes = MAX_PASSES, neighbours = NEIGHBOURS, store = True,
+                 evaluator = None):
     """
     Variable neighbourhood descent over the operators (in the given order) until no operator
     improves the two-way cost or max_rounds is reached.
@@ -348,13 +349,14 @@ def local_search(problem, routes, operators = ("relocate", "two_opt_star"), seed
     improve): otherwise the start is returned unchanged with report["feasible_start"] False.
     store: the improved complete route set goes to problem.heuristics_solutions
     (RH.add_to_feasible_solution) so check_found_solutions sees it at the two-echelon level.
+    evaluator: a RouteEvaluator to share its cache of exact route checks (e.g. with the ALNS).
     :return: (routes, report) with report = start / final cost, number of SEVs, moves, exact
              checks, pruned moves, cache hits, time
     """
     started = time.time()
     rng = random.Random(seed)
     routes = [list(route) for route in routes if route]
-    ctx = SearchContext(problem, routes, neighbours)
+    ctx = SearchContext(problem, routes, neighbours, evaluator)
     report = {"start_cost": ctx.total_cost(), "start_sevs": len(ctx.routes),
               "feasible_start": all(rd.feasible for rd in ctx.routes)}
     stats = new_stats()

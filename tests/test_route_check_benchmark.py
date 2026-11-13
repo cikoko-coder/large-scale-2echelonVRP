@@ -111,32 +111,3 @@ def test_is_route_feasible_uses_the_two_way_rule():
             cheapest = RH.optimal_transshipment_checking(p, route)
             assert cheapest["n_trips"] >= two_way["n_trips"] and cheapest["cost"] <= two_way["cost"] + 1e-6
     assert checked >= 20
-
-
-def test_free_mip_initializer_is_costed_by_the_two_way_check():
-    """Second initialization method: the free routing MIP without any routes passed; its
-    multi-trip solution is costed by the two-way check and compared with the heuristic on it."""
-    import Multi_level_destroy as MLD
-    with contextlib.redirect_stdout(io.StringIO()):
-        p = instanceGenerator.readGenerate_benchmark("c208.txt", 100, unbounded_vehicle_time=True)
-        p.tabu_search_active = False
-        p.modelStartTime = time.time()
-        p.points_found = []
-        p.min_relaxed_transfer_num = 0
-        p.synch_check = True
-        p.customers = sorted(p.customers, key=lambda node: node.index)[:12]
-        heuristic = MLD.multi_start_initial(p, 2)
-        solution, result = MLD.mip_initial_solution(p, 60, customers=p.customers)
-    assert result["feasible"] and not result["warm_started"]
-    assert solution.is_feasible
-    routes = [route.sequence for route in solution.routes_sevs]
-    two_way = RH.two_way_solution_cost(p, routes)
-    assert two_way["feasible"] and solution.two_way_cost == pytest.approx(two_way["cost"])
-    expected = sum(RH.is_route_feasible(p, route)[2] for route in routes) + p.cost_vehicle_use * len(routes)
-    assert two_way["cost"] == pytest.approx(expected, abs=1e-6)
-    # the two-way plan is never cheaper than the MIP's cheapest plan and the MIP is optimal at gap 0
-    assert two_way["cost"] >= result["objective"] - 1e-3 * max(1.0, abs(result["objective"]))
-    method, chosen = MLD.select_initial_by_two_way(p, [("heuristic", heuristic), ("free_mip", solution)])
-    assert chosen.two_way_cost == min(MLD.set_two_way_cost(p, heuristic)["cost"], solution.two_way_cost)
-    # an incomplete route set is infeasible for the two-way cost
-    assert not RH.two_way_solution_cost(p, routes[:-1] + [routes[-1][:-1]])["feasible"]

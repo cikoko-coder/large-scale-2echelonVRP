@@ -172,16 +172,28 @@ def two_way_transshipment_checking(problem_instance, route):
     result["min_trips_on_time"] = result["n_trips"] if result["feasible"] else None
     return result
 
+def satellite_detour(problem_instance, i, j, matrix = "travel_matrix"):
+    """(detour, satellite) of the closest satellite p on the arc i -> j: min over p of
+    m(i,p) + m(p,j) - m(i,j) (ties by the smaller index), m = problem_instance.<matrix>.
+    Memoized per problem, matrix and satellite set (the route checks ask for the same arcs again
+    and again)."""
+    sats = problem_instance.satellites
+    memo = problem_instance.__dict__.setdefault("_satellite_detour_memo", {})
+    memo = memo.setdefault((matrix, tuple(p.index for p in sats)), {}) #consolidation swaps the satellite set
+    hit = memo.get((i, j))
+    if hit is None:
+        m = getattr(problem_instance, matrix)
+        hit = min((m[i][p.index] + m[p.index][j] - m[i][j], p.index) for p in sats)
+        memo[(i, j)] = hit
+    return hit
+
 def refill_detours(problem_instance, route):
     """(detour, satellite) of the closest satellite for a refill before every route position:
     detour = t(i,p) + t(p,j) - t(i,j) >= 0 with i the predecessor (garage for position 0)."""
-    t = problem_instance.travel_matrix
     previous = [0] + [node.index for node in route[:-1]]
     out = []
     for pos, node in enumerate(route):
-        i = previous[pos]
-        detour, satellite = min((t[i][p.index] + t[p.index][node.index] - t[i][node.index], p.index)
-                                for p in problem_instance.satellites)
+        detour, satellite = satellite_detour(problem_instance, previous[pos], node.index)
         out.append((max(0.0, detour), satellite)) #lead time >= 0 in the MIP (rounding can give -0.1)
     return out
 
@@ -1000,9 +1012,7 @@ def get_min_multi_trip_cost(problem_instance, route):
     
     arcs_no_trip = MathModels.generate_arcs(route)
 
-    arcs_with_trip = [min(problem_instance.distance_matrix[i][satellite.index]
-                       + problem_instance.distance_matrix[satellite.index][j]
-                       - problem_instance.distance_matrix[i][j] for satellite in problem_instance.satellites) 
+    arcs_with_trip = [satellite_detour(problem_instance, i, j, "distance_matrix")[0]
                        for [i,j] in arcs_no_trip if j!=0]
 
     min_transfer = math.ceil((sum([node.demand for node in route]) )/problem_instance.capacity_SEV) 
@@ -1028,9 +1038,7 @@ def get_makespan(problem_instance, route): #check feasibility in time, use the l
     
     arcs_no_trip = MathModels.generate_arcs(route)
 
-    arcs_with_trip = [min(problem_instance.distance_matrix[i][satellite.index]
-                       + problem_instance.distance_matrix[satellite.index][j]
-                       - problem_instance.distance_matrix[i][j] for satellite in problem_instance.satellites) 
+    arcs_with_trip = [satellite_detour(problem_instance, i, j, "distance_matrix")[0]
                        for [i,j] in arcs_no_trip if j!=0]
 
     min_transfer = math.ceil((sum([node.demand for node in route]) )/problem_instance.capacity_SEV)
