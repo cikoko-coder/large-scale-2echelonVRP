@@ -6,6 +6,7 @@ import time
 import copy
 import MathModels 
 import Repair_heuristcs as RH
+import local_search as LS
 import SEVs
 BigNumber = 1000000
 #define set up for ALNS operators instead of creating at each time required such as probs, scores, used times and etc.
@@ -402,205 +403,63 @@ def get_weights_for_nodes_removal(customers_to_select, pool): #ordered by the cu
     weights = [x/sumx for x in weights]
     
     return weights
-def two_point_crossover(list1, list2, problem_instance = None):
-    if len(list1) == 1 or len(list2) == 1:
-        return list1, list2
-    """
-    Perform a two-point crossover operation on two lists.
+# Local search: the two operators (relocate, 2-opt* = tail exchange, the revised one-point
+# crossover) live in local_search.py; every move is decided by the two-way check with the
+# forward / backward time screen, the cost lower bound, granular neighbour lists and a route cache.
+def _routes_of(solution):
+    if type(solution) != list: # a two-echelon / multi-trip object
+        return [list(route.sequence) for route in solution.routes_sevs]
+    return [list(route) for route in solution]
 
-    Args:
-        list1 (list): The first list.
-        list2 (list): The second list.
+def perform_N_two_point_crossover(problem_instance, routes_in, N, points = 1):
+    """2-opt* (tail exchange) descent, at most N passes. :return: (relative change of the two-way cost, routes)"""
+    return _run_operators(problem_instance, routes_in, ("two_opt_star",), N)
 
-    Returns:
-        tuple: A tuple containing the two offspring lists and a boolean indicating whether the lists can be combined.
-    """
-    # Get the length of the lists
-    length1 = len(list1)
-    length2 = len(list2)
-    
-    if length1 > length2:
-        list1, list2 = list2, list1
-        length1, length2 = length2, length1
-    
-    # Choose two random crossover points
-    while True:
-        try:
-            point1 = random.randint(0, length1 - 1)
-            point2 = random.randint(point1 + 1, length1 - 1)
-        except ValueError:
-            continue
-        break
+def perform_N_relocation(problem_instance, current_solution, N):
+    """Relocate descent, at most N passes. :return: (relative change of the two-way cost, routes)"""
+    return _run_operators(problem_instance, current_solution, ("relocate",), N)
 
-    # Perform the crossover
-    offspring1 = list1[:point1] + list2[point1:point2] + list1[point2:]
-    offspring2 = list2[:point1] + list1[point1:point2] + list2[point2:]    
-
-    return offspring1, offspring2
-def one_point_crossover(list1, list2, problem_instance = None):
-    """
-    Perform a two-point crossover operation on two lists.
-
-    Args:
-        list1 (list): The first list.
-        list2 (list): The second list.
-
-    Returns:
-        tuple: A tuple containing the two offspring lists and a boolean indicating whether the lists can be combined.
-    """
-    # Get the length of the lists
-    length1 = len(list1)
-    length2 = len(list2)
-    if len(list1) == 1 or len(list2) == 1:
-        return list1, list2
-    
-    if length1 > length2:
-        list1, list2 = list2, list1
-        length1, length2 = length2, length1
-    # Choose two random crossover points
-    while True:
-        try:
-            point1 = random.randint(0, length1 - 1) 
-            chosen_index =  list1[point1-1].index 
-            ee = problem_instance.earliest_times_feasible 
-            ll = problem_instance.latest_times_feasible 
-            x = ([node for node in list2 
-                  if ee[chosen_index] +list1[point1-1].unloading_time+problem_instance.distance_matrix[chosen_index][node.index] < ll[node.index]])
-            if x:
-                point2 = list2.index(x[0])
-            else:
-                continue
-            #point2 = random.randint(point1 + 1, length1 - 1)
-            
-        except ValueError:
-            continue
-        break
-
-    # Perform the crossover
-    offspring1 = list1[:point1] +  list2[point2:]
-    offspring2 = list2[:point2] + list1[point1:] 
-
-    return offspring1, offspring2
-
-def perform_N_two_point_crossover(problem_instance,routes_in, N, points = 1):
-    routes = copy.deepcopy(routes_in)
-    if len(routes) <2:
+def _run_operators(problem_instance, routes_in, operators, passes):
+    routes = _routes_of(routes_in)
+    if len(routes) < 2 or passes < 1:
         return 0, routes
-    
-    initial_route_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-
-    for _ in range(N):
-        RH.update_intervals(problem_instance, routes)
-    
-        #get two random routes
-        routes_to_choose = [route for route in routes if len(route) > 1]
-        routes_chosen = random.sample(routes_to_choose, 2)
-        route1 = routes_chosen[0]
-        route2 = routes_chosen[1]
-        if route1 == route2 or min(len(route1), len(route2)) == 1:
-            N = N +1
-            continue
-        
-        list1 = [copy.deepcopy(node) for node in route1]
-        list2 = [copy.deepcopy(node) for node in route2]
-        if (len(list1) != 1 and len(list2) != 1) and points == 1:
-            offspring1, offspring2 = one_point_crossover(list1, list2, problem_instance)
-        else:
-            offspring1, offspring2 = two_point_crossover(list1, list2,problem_instance)  
-
-        improving_move = False     
-        total_cost = 0         
-        
-        result2 = RH.is_route_feasible(problem_instance, offspring2)
-        if not result2[0]:
-            continue
-        total_cost += result2[2]
-
-        result1 = RH.is_route_feasible(problem_instance, offspring1)
-        if not result1[0]:
-            continue
-        
-        total_cost += result1[2]
-        initial_total_cost = RH.is_route_feasible(problem_instance, route1)[2] + RH.is_route_feasible(problem_instance, route2)[2]
-        
-        if total_cost < initial_total_cost  and abs(initial_total_cost - total_cost) > 0.5:
-            improving_move = True
-
-        if improving_move:
-            RH.add_to_feasible_solution(problem_instance, routes)
-            routes[routes.index(route1)] = offspring1
-            routes[routes.index(route2)] = offspring2 
-            sum2 = sum([len(x) for x in routes]) 
-            if sum2 != len(problem_instance.customers):
-                print("Error in crossover move: not all nodes visited")
-    final_routes_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-    improvement_percentage = (final_routes_cost - initial_route_cost)/initial_route_cost
-        
-    return improvement_percentage, routes
-
-def perform_N_relocation(problem_instance,current_solution, N):
-    routes = copy.deepcopy(current_solution)
-
-    if len(routes) <2:
-        return 0, routes
-
-    initial_route_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-    
-    for _ in range(N):
-        initial_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-
-        routes_chosen = random.sample(routes, 2)
-        node_chosen = random.choice(routes_chosen[0])
-        
-        routes.remove(routes_chosen[0])
-        routes.remove(routes_chosen[1])
-
-        routes_chosen[0].remove(node_chosen)
-        pool = [node_chosen]
-        routes_chosen = [x for x in routes_chosen if len(x) > 0]
-
-        routes_modified, pool = RH.k_best_insertion_repair(problem_instance, routes_chosen, pool, 1, True)
-        
-        routes.extend(routes_modified)
-        final_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-        if final_cost < initial_cost and abs(initial_cost - final_cost) > 0.5:
-            RH.add_to_feasible_solution(problem_instance, routes)
-        if len(pool)>0:
-            print("partial solution found in repairing")
-        sum_served = sum(len(route) for route in routes)
-        if sum_served != len(problem_instance.customers):
-            print("customer node loss/addition")
-
-
-    final_routes_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes])
-    improvement_percentage = (final_routes_cost - initial_route_cost )/initial_route_cost
-        
-    return improvement_percentage, routes
+    routes, report = LS.local_search(problem_instance, routes, operators = operators, max_rounds = 1,
+                                     max_passes = passes, seed = random.random())
+    return (report["final_cost"] - report["start_cost"])/report["start_cost"], routes
 
 def Local_search_incumbent(problem_instance, current_solution_in, replications = 5,  iters = 50):
+    """
+    Relocate + 2-opt* descent (local_search.local_search) on the SEV routes of the incumbent:
+    rounds of both operators until neither improves the two-way cost (at most `replications`
+    rounds, `iters` passes per operator and round). The improved route set is stored for the
+    two-echelon check. :return: (relative change of the two-way cost, routes)
+    """
+    routes = _routes_of(current_solution_in)
+    routes, report = LS.local_search(problem_instance, routes, max_rounds = max(1, replications),
+                                     max_passes = max(1, iters), seed = random.random())
+    problem_instance.local_search_report = report
+    if not report["start_cost"]:
+        return 0, routes
+    return (report["final_cost"] - report["start_cost"])/report["start_cost"], routes
 
-    if type(current_solution_in) != list: # a two-echelon object
-        routes1 = [copy.deepcopy(route.sequence) for route in current_solution_in.routes_sevs]
-
-    else:
-        routes1 = copy.deepcopy(current_solution_in) #do not change given solution just find better to store if possible
-    
-    initial_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes1])
-    improvement_percentage1 = 5
-    for _ in range(replications):
-        improvement_percentage2, routes2 = perform_N_relocation(problem_instance,routes1, 0)
-        if abs(improvement_percentage1 + improvement_percentage2) < 0.001:
-            break
-        improvement_percentage1, routes1 = perform_N_two_point_crossover(problem_instance,routes2, iters)
-        if abs(improvement_percentage1 + improvement_percentage2) < 0.001:
-            break
-    
-    
-    
-    final_cost = sum([RH.is_route_feasible(problem_instance, route)[2] for route in routes1])
-    percentage_imp = (final_cost - initial_cost)/initial_cost
-
-    return percentage_imp, routes1
+def local_search_initial(problem_instance, solution, seed = None, max_rounds = 20):
+    """
+    Improve an initial multi-trip solution by the relocate + 2-opt* descent (local_search.py,
+    two-way check). The improved route set is stored for the two-echelon check and checked again
+    as a multi-trip solution (transshipments by the DP), with its two-way cost set.
+    :return: (improved multi-trip solution, or the given one when nothing improved or the start
+             is not feasible, local search report)
+    """
+    if solution is None or not solution.is_feasible:
+        return solution, None
+    routes, report = LS.local_search(problem_instance, _routes_of(solution), seed = seed, max_rounds = max_rounds)
+    if report["improvement"] <= LS.MIN_GAIN:
+        return solution, report
+    improved = RH.check_feasibility(problem_instance, routes, VRP_only = False, multi_trip = True, single_route_MVRP = False)
+    set_two_way_cost(problem_instance, improved)
+    if not improved.is_feasible:
+        return solution, report
+    return improved, report
 
 def select_seed_customers(problem_instance, nstart = 5):
     distances = [[x, min(problem_instance.distance_matrix[problem_instance.depot.index][satellite.index]

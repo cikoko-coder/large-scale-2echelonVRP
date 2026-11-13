@@ -40,6 +40,8 @@ ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or 
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
 REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
+LOCAL_SEARCH_INITIAL = True  # relocate + 2-opt* descent (local_search.py, two-way check) on the constructed
+#                              solution before it becomes a candidate / the MIP warm start
 # initial solution:
 #   "heuristic"          multi-start insertion only
 #   "mip"                free street routing MIP over all customers only (MathModels.street_routing_MIP)
@@ -343,7 +345,8 @@ def run_initial_construction(instance_name: str, reports: dict):
     2. RH.check_found_solutions: the complete route sets stored during the construction
        are checked again; feasible ones get the water (FE) MIP (FEVmodels) -> the
        two-echelon solution, stored in problem.best_found.
-    Local search and ALNS are not run.
+    With LOCAL_SEARCH_INITIAL the constructed solution is improved by the relocate + 2-opt*
+    descent (local_search.py) first. ALNS is not run.
     """
     import random
 
@@ -407,7 +410,21 @@ def run_initial_construction(instance_name: str, reports: dict):
                  f"{sol.nSEVs} SEVs, {len(getattr(sol, 'trips', []))} trips, objective {round(sol.objective, 1)}, "
                  f"two-way cost {round(sol.two_way_cost, 1)}")
         emit(describe_solution(problem, construction, "constructed multi-trip solution (street level)"))
-        candidates.append(("heuristic", construction))
+        if LOCAL_SEARCH_INITIAL:
+            MLD.set_two_way_cost(problem, construction)
+            t_ls = time.time()
+            improved, ls_report = MLD.local_search_initial(problem, construction, seed=RANDOM_SEED)
+            emit("")
+            emit(f"--- step 1+: local search (relocate + 2-opt*, two-way check): {time.time() - t_ls:.2f}s")
+            if ls_report is None:
+                emit("  skipped: the constructed solution is not feasible")
+            else:
+                emit("  " + MLD.LS.format_report(ls_report))
+                if improved is not construction:
+                    emit(f"  two-way cost of the improved multi-trip solution {round(improved.two_way_cost, 1)}")
+                    emit(describe_solution(problem, improved, "improved multi-trip solution (street level)"))
+                    construction = improved
+        candidates.append(("heuristic" + ("+ls" if LOCAL_SEARCH_INITIAL else ""), construction))
     if INITIAL_METHOD in ("mip", "heuristic+mip", "heuristic+free_mip"):
         warm = None
         if INITIAL_METHOD == "heuristic+mip" and construction is not None and construction.is_feasible:
