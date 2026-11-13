@@ -27,6 +27,15 @@ features the original code used: binary/integer/continuous variables, linear
 constraints, a linear objective, time limit, relative MIP gap, an objective
 cutoff, warm starts, and reading back status, objective, gap and values.
 
+Hierarchical (lexicographic) objectives: ``set_objectives([f1, f2, f3])`` minimizes f1,
+then f2 among the solutions with the best f1, then f3, the same for every backend:
+one solve per level, each level fixes the value of its objective (``f_k <= f_k*``, the
+incumbent value; exact for integer-valued levels) and warm-starts the next level with
+the incumbent. The time limit is shared: level k gets the remaining time divided by the
+number of levels left (unused time passes on). The cutoff applies to the first level.
+After the solve ``obj_values`` holds the value of every level and ``obj_value`` the
+value of the last level solved.
+
 Example
 -------
 >>> m = MILP("test")
@@ -293,6 +302,7 @@ class MILP:
         self.vars: List[Var] = []
         self.constrs: List[Constraint] = []
         self.objective = LinExpr()
+        self.objectives: Optional[List[LinExpr]] = None  # hierarchical levels (set_objectives)
         self.minimize = True
         # parameters
         self.time_limit: float = INF
@@ -329,6 +339,17 @@ class MILP:
 
     def set_objective(self, e, minimize: bool = True):
         self.objective = LinExpr._as_expr(e).copy()
+        self.objectives = None
+        self.minimize = minimize
+
+    def set_objectives(self, levels: Sequence, minimize: bool = True):
+        """Hierarchical (lexicographic) objective: minimize levels[0], then levels[1] among
+        the optimal solutions of levels[0], and so on (see the module docstring)."""
+        levels = [LinExpr._as_expr(e).copy() for e in levels]
+        if not levels:
+            raise ValueError("set_objectives needs at least one objective")
+        self.objective = levels[0]
+        self.objectives = levels if len(levels) > 1 else None
         self.minimize = minimize
 
     def set_start(self, var: Var, value: float):
@@ -359,6 +380,13 @@ class MILP:
     def gap(self) -> Optional[float]:
         return self.stats.mip_gap
 
+    @property
+    def obj_values(self) -> List[float]:
+        """Objective value of every hierarchical level solved (one entry for a single objective)."""
+        if "level_values" in self.stats.extra:
+            return list(self.stats.extra["level_values"])
+        return [] if self.stats.obj_value is None else [self.stats.obj_value]
+
     def value(self, v: Var) -> float:
         if self._x is None:
             raise RuntimeError("no solution available")
@@ -370,6 +398,16 @@ class MILP:
     # ---- solving --------------------------------------------------------- #
     def optimize(self) -> str:
         t0 = time.time()
+        if self.objectives:
+            self._solve_hierarchical()
+        else:
+            self._solve_single()
+        self.stats.runtime = time.time() - t0
+        for callback in list(_solve_listeners):
+            callback(self)
+        return self.stats.status
+
+    def _solve_single(self):
         self.stats = SolveStats(backend=self.backend, n_vars=len(self.vars), n_constrs=len(self.constrs))
         self._x = None
         if self.backend == "highs":
@@ -380,12 +418,76 @@ class MILP:
             self._solve_gurobi()
         else:
             raise ValueError(f"unknown backend {self.backend}")
-        self.stats.runtime = time.time() - t0
         if self._x is not None and self.stats.obj_value is None:
             self.stats.obj_value = self.expr_value(self.objective)
-        for callback in list(_solve_listeners):
-            callback(self)
-        return self.stats.status
+
+    def _integer_valued(self, e: LinExpr) -> bool:
+        """True when e takes integer values only (integer coefficients on integer variables)."""
+        return float(e.const).is_integer() and all(
+            float(c).is_integer() and self.vars[k].vtype != "C" for k, c in e.coefs.items())
+
+    def _solve_hierarchical(self):
+        """One solve per level: fix the value of the level, warm-start the next one."""
+        levels = self.objectives
+        t0 = time.time()
+        n_constrs0 = len(self.constrs)
+        starts0 = [v.start for v in self.vars]
+        cutoff0, time_limit0 = self.cutoff, self.time_limit
+        sense = 1.0 if self.minimize else -1.0
+        values, level_stats, best_x = [], [], None
+        all_optimal = True
+        try:
+            for k, e in enumerate(levels):
+                if time_limit0 != INF:
+                    remaining = time_limit0 - (time.time() - t0)
+                    if best_x is not None and remaining <= 0:
+                        all_optimal = False
+                        break
+                    self.time_limit = max(remaining, 0.01) / (len(levels) - k)
+                self.objective = e
+                self.cutoff = cutoff0 if k == 0 else None
+                if best_x is not None:
+                    for v, x in zip(self.vars, best_x):
+                        v.start = x
+                t_level = time.time()
+                self._solve_single()
+                self.stats.runtime = time.time() - t_level
+                level_stats.append(self.stats)
+                if self._x is None:  # no incumbent at this level: keep the previous level's
+                    all_optimal = False
+                    break
+                best_x = list(self._x)
+                value = self.expr_value(e)
+                values.append(value)
+                all_optimal = all_optimal and self.stats.status == OPTIMAL
+                if k < len(levels) - 1:
+                    if self._integer_valued(e):
+                        bound = float(round(value))
+                    else:
+                        bound = value + sense*max(1e-6, 1e-9*abs(value))
+                    self.add_constr(e <= bound if self.minimize else e >= bound, name=f"level{k}")
+        finally:
+            del self.constrs[n_constrs0:]
+            for v, x in zip(self.vars, starts0):
+                v.start = x
+            self.cutoff, self.time_limit = cutoff0, time_limit0
+            self.objective = levels[0]
+
+        first = level_stats[0]
+        self.stats = SolveStats(backend=self.backend, n_vars=len(self.vars), n_constrs=len(self.constrs))
+        self._x = best_x
+        if best_x is None:
+            self.stats.status = first.status
+        else:
+            self.stats.status = OPTIMAL if all_optimal and len(values) == len(levels) else FEASIBLE
+            self.stats.obj_value = values[-1]
+            last = level_stats[len(values) - 1]
+            self.stats.obj_bound = last.obj_bound
+            gaps = [st.mip_gap for st in level_stats[:len(values)] if st.mip_gap is not None and st.mip_gap == st.mip_gap]
+            self.stats.mip_gap = max(gaps) if gaps else (0.0 if self.stats.status == OPTIMAL else None)
+        self.stats.extra["level_values"] = values
+        self.stats.extra["level_status"] = [st.status for st in level_stats]
+        self.stats.extra["level_runtime"] = [st.runtime for st in level_stats]
 
     # .................................................................... #
     def _matrix(self):

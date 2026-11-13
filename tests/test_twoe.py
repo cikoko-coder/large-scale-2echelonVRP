@@ -68,6 +68,23 @@ def test_small_milp_optimal(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_hierarchical_objectives(backend):
+    """Lexicographic: first level wins whatever the size of the second level's coefficients."""
+    m = S.MILP("lex", backend=backend)
+    a = m.add_var(vtype="B", name="a")  # cheap in level 1, very expensive in level 2
+    b = m.add_var(vtype="B", name="b")
+    c = m.add_var(vtype="B", name="c")
+    m.add_constr(a + b + c >= 1)
+    m.add_constr(b + c >= 1)
+    m.set_objectives([S.quicksum([a, b, c]), 1000 * b + 1 * c])
+    m.time_limit = 30
+    assert m.optimize() == S.OPTIMAL
+    assert m.value(c) == pytest.approx(1.0) and m.value(a) + m.value(b) == pytest.approx(0.0)
+    assert m.obj_values == pytest.approx([1.0, 1.0])
+    assert m.num_constrs == 2  # the level constraints are removed after the solve
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_maximize(backend):
     m = S.MILP("max", backend=backend)
     z = m.add_var(vtype="I", ub=10)

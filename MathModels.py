@@ -278,30 +278,36 @@ def add_temporal_constraints(problem, model):
 
     return 
 
-def add_objective(problem, model):
-    # Define objective components
-    
-    fixed_vehicle_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="fixed_vehicle_cost") #number of cars 
-    distance_travel_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="distance_travel_cost") 
-    lead_time_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="lead_time_cost")
+def add_objective(problem, model, fleet_level = True):
+    """Hierarchical (lexicographic) objective of the street model, no weights between the levels:
+    1. fleet size (number of SEVs)                      -- skipped when the routes are fixed
+    2. number of transshipments (refill visits)
+    3. total distance: arc distances + satellite detours (lead times), times c^s
+    The cost parts are kept as expressions (model._fixed_vehicle_cost, ...) for reporting
+    the paper cost (beta^s * vehicles + distance + detours + trip_unit_cost * transshipments)."""
+    n_transshipments = quicksum(model._v[i,k.index] for i in model._customers for k in problem.satellites)
+    distance_travel_cost = quicksum(model._xij[i,j]*problem.DistMatrix[i][j]*problem.cost_unit_travel for [i,j] in model._arcList)
+    lead_time_cost = quicksum(model._lead_time[i]*problem.cost_unit_travel for i in model._customers)
 
-
-    model.add_constr(fixed_vehicle_cost>=model._nofCars*problem.cost_vehicle_use) #fixed 
-    model.add_constr(distance_travel_cost >= quicksum(model._xij[i,j]*problem.DistMatrix[i][j]*problem.cost_unit_travel for [i,j] in model._arcList)) #fixed
-    model.add_constr(lead_time_cost>=quicksum(model._lead_time[i]*problem.cost_unit_travel for i in model._customers)) #variable wrt customers
-    
-    
-
-    model.set_objective(fixed_vehicle_cost + distance_travel_cost + lead_time_cost + problem.trip_unit_cost*quicksum(model._v[i,k.index] for i in model._customers for k in problem.satellites))
+    levels = [n_transshipments, distance_travel_cost + lead_time_cost]
+    if fleet_level:
+        levels.insert(0, LinExpr() + model._nofCars)
+    model.set_objectives(levels)
 
     model.verbose = False
     model.mip_gap = 0.0
-    model._fixed_vehicle_cost = fixed_vehicle_cost
+    model._n_transshipments = n_transshipments
+    model._fixed_vehicle_cost = model._nofCars*problem.cost_vehicle_use
     model._distance_travel_cost = distance_travel_cost
     model._lead_time_cost = lead_time_cost
-
-
     return
+
+def paper_cost(problem, model):
+    """beta^s * vehicles + distance + detours + trip_unit_cost * transshipments of the
+    current solution (the cost reported to the heuristics, not the MIP objective)."""
+    ev = model.expr_value
+    return (ev(model._fixed_vehicle_cost) + ev(model._distance_travel_cost) + ev(model._lead_time_cost)
+            + problem.trip_unit_cost*round(ev(model._n_transshipments)))
 #the trip assignment model used for checking a single route or a complete route set: the
 #sequences are fixed, the model places the transshipments (see street_routing_MIP for free routing)
 def street_problem_MIP(problem, timelimit, single= None, multiple = None, transfers_in = None): 
@@ -330,7 +336,7 @@ def street_problem_MIP(problem, timelimit, single= None, multiple = None, transf
     add_assignment_constraints(problem, model, solution_in)
     add_capacity_constraints_load(problem, model, solution_in, transfers_in)   
     add_temporal_constraints(problem, model)    
-    add_objective(problem, model)
+    add_objective(problem, model, fleet_level = False) #the routes fix the fleet
     
     #do not return any solution/vehicle object, create whenever needed 
     #returns the feasibility, costs, visits, routes  
@@ -340,8 +346,10 @@ def street_routing_MIP(problem, timelimit, customers = None, warm_start = None, 
     """
     Free routing model: the street problem MIP over all (or the given) customers with the
     routing variables free. The model builds the SEV routes, places the transshipments and
-    chooses their satellites; objective = vehicle use + travel distance + detours
-    + trip_unit_cost per transshipment (add_objective). Optimal for the street (SE) problem
+    chooses their satellites; hierarchical objective (add_objective): fleet size, then number
+    of transshipments, then distance + detours. "objective" in the result is the paper cost
+    beta^s * vehicles + distance + detours + trip_unit_cost * transshipments of that solution,
+    "objective_levels" the values of the three levels. Optimal for the street (SE) problem
     when it ends with gap 0; with a time limit the incumbent is a feasible solution.
     warm_start: routes (node lists) given as a MIP start, e.g. the heuristic construction;
                 the transshipments of the start come from the refill DP of every route.
@@ -387,10 +395,12 @@ def street_routing_MIP(problem, timelimit, customers = None, warm_start = None, 
     routes = get_routes(problem, used_arcs)
     visits = [[i, p.index] for p in problem.satellites for i in model._customers if val(model._v[i, p.index]) > 0.5]
     gap = model.gap if model.gap is not None and model.gap == model.gap else (0.0 if model.status == "OPTIMAL" else math.inf)
-    result.update(feasible=True, objective=model.obj_value, routes=routes, visits=visits,
+    ev = model.expr_value
+    result.update(feasible=True, objective=paper_cost(problem, model), objective_levels=model.obj_values,
+                  routes=routes, visits=visits,
                   n_vehicles=int(round(val(model._nofCars))), gap=gap,
-                  fixed_vehicle_cost=val(model._fixed_vehicle_cost), distance_travel_cost=val(model._distance_travel_cost),
-                  lead_time_cost=val(model._lead_time_cost), transshipment_cost=problem.trip_unit_cost*len(visits))
+                  fixed_vehicle_cost=ev(model._fixed_vehicle_cost), distance_travel_cost=ev(model._distance_travel_cost),
+                  lead_time_cost=ev(model._lead_time_cost), transshipment_cost=problem.trip_unit_cost*len(visits))
     return result
 
 def solve_MIP(problem, model,timelimit, solution_in, route_return = False):    
@@ -425,10 +435,9 @@ def solve_MIP(problem, model,timelimit, solution_in, route_return = False):
             print("Error in transfer point check: multiple satelllite assignments for the same transfer point") #store it for each transshipment 
             SystemExit(0)
         lead_times = [[i, val(model._lead_time[i])] for i in model._customers]
-        obj_value = model.obj_value
-        fixed_vehicle_cost = val(model._fixed_vehicle_cost)
-        distance_travel_cost = val(model._distance_travel_cost)
-        lead_time_cost = val(model._lead_time_cost)
+        fixed_vehicle_cost = model.expr_value(model._fixed_vehicle_cost)
+        distance_travel_cost = model.expr_value(model._distance_travel_cost)
+        lead_time_cost = model.expr_value(model._lead_time_cost)
 
         #verification of the solution
         leaving_vehicles = [j for [i,j] in used_arcs if i == 0]

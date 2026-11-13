@@ -60,8 +60,10 @@ def solve_MIP(problem, model, tasks,SE_cost, timelimit):
     model.params["gurobi"]["Heuristics"] = MathModels.GUROBI_HEURISTICS
     model.verbose = False
     model.time_limit = timelimit
+    #cutoff on the paper cost beta^w * vessels + distance: the fleet level is cut at
+    #cutoff / beta^w (distance >= 0), the cost of the hierarchical optimum is checked below
     cutoff = problem.cutoff - 1 - SE_cost
-    model.cutoff = cutoff if math.isfinite(cutoff) else None
+    model.cutoff = cutoff/problem.cost_vehicle_use_FEV if math.isfinite(cutoff) and problem.cost_vehicle_use_FEV > 0 else None
     model.optimize()
     solution_time_mip = time.time() - start_mip
     #model.write("FEV_MIP.lp")
@@ -90,9 +92,11 @@ def solve_MIP(problem, model, tasks,SE_cost, timelimit):
                 taskj_satellite = [task for task in tasks if task.transfer_point == j][0]
                 loc_j = taskj_satellite.index
                 locations_arcs.append([loc_i, loc_j])
-        obj_value = model.obj_value
-        fixed_vehicle_cost = val(model._fixed_vehicle_cost)
-        distance_travel_cost = val(model._distance_travel_cost)
+        fixed_vehicle_cost = model.expr_value(model._fixed_vehicle_cost)
+        distance_travel_cost = model.expr_value(model._distance_travel_cost)
+        obj_value = fixed_vehicle_cost + distance_travel_cost #paper cost z^w of the hierarchical optimum
+        if math.isfinite(cutoff) and obj_value > cutoff:
+            return  False, None, None, None, None, None
 
         return True, obj_value, fleet, distance_travel_cost, used_arcs, locations_arcs
 
@@ -154,12 +158,11 @@ def add_synchronzation_constraints(problem, model, tasks, route_list):
 
     return 
 def add_objective(problem, model,tasks):
-    fixed_vehicle_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="fixed_vehicle_cost") #number of cars 
-    distance_travel_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="distance_travel_cost") 
-
-
-    model.add_constr(fixed_vehicle_cost>=model._nofVessels*problem.cost_vehicle_use_FEV) #fixed, beta^w 
-    
+    """Hierarchical (lexicographic) objective of the water model, no weights between the levels:
+    1. fleet size (number of FEVs)
+    2. total distance, times c^w
+    (the transshipments are given by the tasks). model._fixed_vehicle_cost = beta^w * vessels
+    is kept as an expression for reporting the paper cost."""
     exp = LinExpr()
     
     for taski in tasks:
@@ -178,14 +181,11 @@ def add_objective(problem, model,tasks):
             if loc_i != loc_j:
                 model.set_start(model._xij[i,j], 0)
 
-    model.add_constr(distance_travel_cost >= exp) #fixed
-    
-
-    model.set_objective(fixed_vehicle_cost + distance_travel_cost)
+    model.set_objectives([LinExpr() + model._nofVessels, exp])
 
     model.mip_gap = 0.0
-    model._fixed_vehicle_cost = fixed_vehicle_cost
-    model._distance_travel_cost = distance_travel_cost
+    model._fixed_vehicle_cost = model._nofVessels*problem.cost_vehicle_use_FEV
+    model._distance_travel_cost = exp
 
 
     return
