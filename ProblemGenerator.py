@@ -125,7 +125,6 @@ class instance:
         self.hard_tw = True         # Hard time window constraint flag
         self.TransferDuration = 0
         self.vrp = True
-        self.mvrp = False
         self.twovrp = False
         self.consolidated = False
 

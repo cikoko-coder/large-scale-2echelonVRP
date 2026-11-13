@@ -276,7 +276,6 @@ class instance:
         self.timelimit_FEmodel = 1000
         self.cutoff = math.inf #does not let any solution be feasible if it is suboptimal, check for intermediate steps for ALNS
         self.vrp = True
-        self.mvrp = False
         self.twovrp = False
         self.heuristics_solutions = []
         self.feas_solutions = []

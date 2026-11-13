@@ -281,3 +281,7 @@ The "Error in demand supply check" print in this restricted-customer mode existe
   transshipment) and transfer duration U = 0. Section 6 above describes the removed setting.
 * Pipeline default: `INITIAL_METHOD = "heuristic+mip"`, the routing MIP warm-started with the
   heuristic routes.
+* `problem.mvrp` is removed: the construction and every repair check each insertion with the
+  two-way route check (`is_route_feasible`) and rank the insertions by the exact two-way cost
+  change, so refill timing is checked while the routes are built (Section 1 described the old
+  behaviour, where `mvrp = False` skipped it).
