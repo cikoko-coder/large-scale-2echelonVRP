@@ -80,13 +80,20 @@ def random_instance(rng, n):
 
 
 def brute_force(problem, route, n_refills=None):
-    """Every set of refill positions (position 0 always refills); n_refills fixes their number."""
+    """Every set of refill positions (position 0 always refills); n_refills fixes their number.
+    :return: the cheapest transfer cost or None"""
+    plans = brute_force_plans(problem, route, n_refills)
+    return min(cost for cost, _ in plans) if plans else None
+
+
+def brute_force_plans(problem, route, n_refills=None):
+    """(transfer cost, end of the last service) of every feasible refill plan."""
     import itertools
     t, n = problem.travel_matrix, len(route)
     prev = [0] + [node.index for node in route[:-1]]
     detour = [max(0.0, min(t[prev[k]][p.index] + t[p.index][route[k].index] - t[prev[k]][route[k].index]
                            for p in problem.satellites)) for k in range(n)]
-    best = None
+    plans = []
     for mask in itertools.product([0, 1], repeat=n - 1):
         cuts = [0] + [k + 1 for k, b in enumerate(mask) if b]
         if n_refills is not None and len(cuts) != n_refills:
@@ -104,9 +111,9 @@ def brute_force(problem, route, n_refills=None):
                 ok = False
                 break
             clock = max(clock, node.start_interval) + node.unloading_time
-        if ok and (best is None or cost < best - 1e-9):
-            best = cost
-    return best
+        if ok:
+            plans.append((cost, clock))
+    return plans
 
 
 def test_cost_optimal_dp_matches_brute_force():
@@ -361,6 +368,47 @@ def test_two_pass_equals_bounded_dp():
 
 
 # ---- two-way rule: minimum number of transshipments on time, then the cheapest plan ---- #
+def brute_force_durations(problem, route, n_refills):
+    """(transfer cost, route duration) of every feasible plan with n_refills refills: for each plan
+    the latest departure from the garage (bisection) and the duration return - departure."""
+    import itertools
+    t, n = problem.travel_matrix, len(route)
+    prev = [0] + [node.index for node in route[:-1]]
+    detour = [max(0.0, min(t[prev[k]][p.index] + t[p.index][route[k].index] - t[prev[k]][route[k].index]
+                           for p in problem.satellites)) for k in range(n)]
+    back = t[route[-1].index][0]
+    t0 = problem.depot.start_interval
+
+    def simulate(cuts, d):
+        clock = d
+        for k, node in enumerate(route):
+            clock += t[prev[k]][node.index]
+            if k in cuts:
+                clock += detour[k] + problem.TransferDuration
+            if clock > node.end_interval + 1e-9:
+                return None
+            clock = max(clock, node.start_interval) + node.unloading_time
+        return clock
+
+    out = []
+    for mask in itertools.product([0, 1], repeat=n - 1):
+        cuts = [0] + [k + 1 for k, b in enumerate(mask) if b]
+        if len(cuts) != n_refills:
+            continue
+        bounds = cuts + [n]
+        if any(sum(nd.demand for nd in route[bounds[k]:bounds[k + 1]]) > problem.capacity_SEV for k in range(len(cuts))):
+            continue
+        if simulate(cuts, t0) is None:
+            continue
+        a, b = t0, max(node.end_interval for node in route) + 1.0  # departures after the last window end are late
+        for _ in range(80):
+            mid = (a + b)/2
+            a, b = (mid, b) if simulate(cuts, mid) is not None else (a, mid)
+        cost = sum(detour[k] + problem.trip_unit_cost for k in cuts)
+        out.append((cost, simulate(cuts, a) + back - a))
+    return out
+
+
 def check_two_way_against_brute_force(problem, route):
     """two_way = smallest feasible number of refills K* (>= m), cheapest plan with K*; returns K* - m."""
     res = RH.two_way_transshipment_checking(problem, route)
@@ -371,7 +419,21 @@ def check_two_way_against_brute_force(problem, route):
         assert res["min_trips_on_time"] is None
         return None
     assert res["n_trips"] == res["min_trips_on_time"] == k_star == len(res["refills"])
-    assert res["transfer_cost"] == pytest.approx(brute_force(problem, route, n_refills=k_star), abs=1e-6)
+    plans = brute_force_plans(problem, route, n_refills=k_star)
+    if RH.TWO_WAY_OBJECTIVE == "duration":  # shortest return - departure, then cheapest
+        durations = brute_force_durations(problem, route, k_star)
+        shortest = min(d for _, d in durations)
+        assert res["duration"] == pytest.approx(shortest, abs=1e-6)
+        assert res["transfer_cost"] == pytest.approx(
+            min(cost for cost, d in durations if d <= shortest + 1e-6), abs=1e-5)
+        assert res["departure"] >= problem.depot.start_interval - 1e-9
+    elif RH.TWO_WAY_OBJECTIVE == "makespan":  # earliest end of the last service, then cheapest
+        earliest = min(finish for _, finish in plans)
+        assert res["finish"] == pytest.approx(earliest, abs=1e-6)
+        assert res["transfer_cost"] == pytest.approx(
+            min(cost for cost, finish in plans if finish <= earliest + 1e-9), abs=1e-6)
+    else:
+        assert res["transfer_cost"] == pytest.approx(min(cost for cost, _ in plans), abs=1e-6)
     assert max(trip_loads(route, res["refills"])) <= problem.capacity_SEV
     cheapest = RH.two_pass_transshipment_checking(problem, route)
     assert cheapest["transfer_cost"] <= res["transfer_cost"] + 1e-6 and cheapest["n_trips"] >= k_star
@@ -380,8 +442,11 @@ def check_two_way_against_brute_force(problem, route):
     return k_star - m
 
 
-def test_two_way_is_lexicographic_minimum_transshipments_then_cost():
-    """two_way_transshipment_checking against brute force on random routes, any trip cost."""
+@pytest.mark.parametrize("objective", ["duration", "makespan", "cost"])
+def test_two_way_is_lexicographic_minimum_transshipments_then_objective(objective, monkeypatch):
+    """two_way_transshipment_checking against brute force on random routes, any trip cost: K*,
+    then the shortest (duration), the earliest (makespan) or the cheapest (cost) plan with K*."""
+    monkeypatch.setattr(RH, "TWO_WAY_OBJECTIVE", objective)
     rng = random.Random(23)
     feasible = 0
     for _ in range(600):

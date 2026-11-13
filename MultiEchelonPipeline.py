@@ -20,8 +20,9 @@ import local_search as LS
 #            from R*, local search on the best ALNS solution (N_LS * k: intensification grows with k),
 #            tabu list update + repair of the found schedules; R* = fewest SEVs, then two-way cost
 #   FE optimization (Multi_level_destroy.Optimize_FE): all min-fleet SE solutions found (more SEVs
-#     discarded) -> every route re-optimized by the fixed-route street MILP (FE_ROUTE_CHECK) -> FE
-#     routing MILP + satellite-removal consolidation (check_found_solutions)
+#     discarded) -> route check FE_ROUTE_CHECK ("dp": the two-way plans of the search, "mip": every
+#     route re-optimized by the fixed-route street MILP) -> FE routing MILP + satellite-removal
+#     consolidation (check_found_solutions)
 #   report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
 
 # --- CONFIGURATION ---
@@ -40,8 +41,10 @@ N_LS = 500                 # local search iterations (times the ITS iteration k)
 N_ALNS = 500               # ALNS iterations per ITS iteration
 SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
 FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
-FE_ROUTE_CHECK = "mip"     # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
+FE_ROUTE_CHECK = "dp"      # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
 #                            no minimum-transshipment bound), "dp" = the two-way DP of the search
+INCUMBENT_ROUTE_MIP = True # on every FE incumbent update, re-solve its routes by the fixed-route street MILP
+#                            (cheapest, any number of transshipments) and keep it if the 2E objective improves
 
 RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)
 LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
@@ -50,6 +53,8 @@ OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
 ROUTE_CHECK = "dp"         # route-level exact check: "dp" (two-way refill DP) or "mip" (street MIP of the fixed route)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" or "optimal"
+TWO_WAY_OBJECTIVE = "duration"  # plan of the two-way check among the K* plans: "duration" (return - departure,
+#                                 latest departure), "makespan" (earliest return) or "cost"
 REPAIR_ALL_STARTS = True   # initialization: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---
@@ -215,6 +220,8 @@ def run_instance(instance_name: str, reports: dict):
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
+    RH.TWO_WAY_OBJECTIVE = TWO_WAY_OBJECTIVE
+    RH.INCUMBENT_ROUTE_MIP = INCUMBENT_ROUTE_MIP
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
     MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     out = []
@@ -231,7 +238,7 @@ def run_instance(instance_name: str, reports: dict):
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
     emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
-         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}")
+         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}, two-way plan by {TWO_WAY_OBJECTIVE}")
     emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), "
          f"{'all' if FE_CANDIDATES is None else f'up to {FE_CANDIDATES}'} min-fleet SE solutions, "
          f"routes re-optimized by {'the fixed-route street MILP' if FE_ROUTE_CHECK == 'mip' else 'the two-way DP'}")
@@ -284,6 +291,10 @@ def run_instance(instance_name: str, reports: dict):
          f"objective {len(problem.inf_solutions)}")
     if mip_log is not None:
         emit("  " + summarize_mip_calls(mip_log, n_mip).replace("\n", "\n  "))
+    for rec in getattr(problem, "incumbent_refinements", []):
+        emit(f"  incumbent {round(rec['objective'], 1)} ({rec['trips']} trips) re-solved by the fixed-route MILP: "
+             + (f"{round(rec['refined_objective'], 1)} ({rec['refined_trips']} trips)" if rec["refined_objective"] is not None
+                else f"not better ({rec['refined_trips']} trips)") + (" -> new incumbent" if rec["improved"] else ""))
     for k, sol in enumerate(problem.feas_solutions):
         emit(f"  solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, {sol.nFEVs} FEVs, "
              f"travel total {round(sol.travelTotal, 1)}")

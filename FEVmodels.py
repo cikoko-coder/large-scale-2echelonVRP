@@ -60,10 +60,11 @@ def solve_MIP(problem, model, tasks,SE_cost, timelimit):
     model.params["gurobi"]["Heuristics"] = MathModels.GUROBI_HEURISTICS
     model.verbose = False
     model.time_limit = timelimit
-    #cutoff on the paper cost beta^w * vessels + distance: the fleet level is cut at
-    #cutoff / beta^w (distance >= 0), the cost of the hierarchical optimum is checked below
-    cutoff = problem.cutoff - 1 - SE_cost
-    model.cutoff = cutoff/problem.cost_vehicle_use_FEV if math.isfinite(cutoff) and problem.cost_vehicle_use_FEV > 0 else None
+    #hierarchical objective (FEVs first): a solution with more FEVs than the incumbent can never be
+    #better, so the fleet level (the first objective level) is cut at the incumbent's FEVs; equal
+    #fleets pass and are compared by the incumbent update (Repair_heuristcs.is_better_solution)
+    bound = getattr(problem, "fe_fleet_bound", math.inf)
+    model.cutoff = bound + 0.5 if math.isfinite(bound) else None
     model.optimize()
     solution_time_mip = time.time() - start_mip
     #model.write("FEV_MIP.lp")
@@ -95,7 +96,7 @@ def solve_MIP(problem, model, tasks,SE_cost, timelimit):
         fixed_vehicle_cost = model.expr_value(model._fixed_vehicle_cost)
         distance_travel_cost = model.expr_value(model._distance_travel_cost)
         obj_value = fixed_vehicle_cost + distance_travel_cost #paper cost z^w of the hierarchical optimum
-        if math.isfinite(cutoff) and obj_value > cutoff:
+        if fleet > bound + 0.5:
             return  False, None, None, None, None, None
 
         return True, obj_value, fleet, distance_travel_cost, used_arcs, locations_arcs

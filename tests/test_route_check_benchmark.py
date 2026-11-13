@@ -111,22 +111,25 @@ def test_is_route_feasible_uses_the_two_way_rule():
     assert checked >= 20
 
 
-def test_route_must_return_to_the_garage_in_time(problem):
-    """The two-way check rejects a plan that ends after the garage closes (bounded vehicle time),
-    the exact replacement of the old makespan bound."""
+def test_route_must_return_to_the_garage_in_time(problem, monkeypatch):
+    """The two-way check rejects a route that cannot be back before the garage closes (bounded
+    vehicle time), the exact replacement of the old makespan bound. Under the duration rule the
+    departure moves earlier when the garage end binds."""
     p = problem
     p.tabu_search_active = False
     route = sorted(p.customers, key=lambda node: node.start_interval)[:5]
-    plan = RH.two_way_transshipment_checking(p, route)
-    assert plan["feasible"]
-    back = plan["finish"] + p.travel_matrix[route[-1].index][0]
+    back = p.travel_matrix[route[-1].index][0]
+    monkeypatch.setattr(RH, "TWO_WAY_OBJECTIVE", "makespan")   # earliest return: departure at the opening
+    earliest = RH.two_way_transshipment_checking(p, route)["finish"] + back
     end = p.depot.end_interval
     try:
-        p.depot.end_interval = back + 1.0
-        assert RH.two_way_transshipment_checking(p, route)["feasible"]
-        p.depot.end_interval = back - 1.0
-        late = RH.two_way_transshipment_checking(p, route)
-        assert not late["feasible"] and late["late_return"] == pytest.approx(1.0)
-        assert not RH.is_route_feasible(p, route)[0]
+        for objective in ("makespan", "duration", "cost"):
+            monkeypatch.setattr(RH, "TWO_WAY_OBJECTIVE", objective)
+            p.depot.end_interval = earliest + 1.0
+            plan = RH.two_way_transshipment_checking(p, route)
+            assert plan["feasible"] and plan["finish"] + back <= p.depot.end_interval + 1e-6, objective
+            p.depot.end_interval = earliest - 1.0
+            assert not RH.two_way_transshipment_checking(p, route)["feasible"], objective
+            assert not RH.is_route_feasible(p, route)[0]
     finally:
         p.depot.end_interval = end
