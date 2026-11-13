@@ -127,3 +127,51 @@ def test_resolve_costs_defaults_to_the_paper_fixed_cost():
     assert c["c_SE"] == 1.0 and c["c_FE"] == pytest.approx(0.1)
     c = resolve_costs(problem, CostConfig(beta_SE=10, beta_FE=20, c_FE=2.0))
     assert c["beta_SE"] == 10.0 and c["beta_FE"] == 20.0 and c["c_FE"] == 2.0
+
+
+# ---- solver choice ------------------------------------------------------- #
+def test_default_backend_is_free_and_selectable(monkeypatch):
+    monkeypatch.delenv("MIP_SOLVER", raising=False)
+    S.set_default_backend(None)
+    if _available("highs"):
+        assert S.MILP("d").backend == "highs"
+    monkeypatch.setenv("MIP_SOLVER", "scipy")
+    assert S.MILP("e").backend == "scipy"
+    S.set_default_backend("gurobi")  # explicit setting wins over the environment variable
+    try:
+        assert S.MILP("f").backend == "gurobi"
+        assert S.MILP("g", backend="highs").backend == "highs"  # per-model choice wins over both
+    finally:
+        S.set_default_backend(None)
+    with pytest.raises(ValueError):
+        S.set_default_backend("cplex")
+    monkeypatch.setenv("MIP_SOLVER", "nope")
+    with pytest.raises(ValueError):
+        S.MILP("h")
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_backend_params_and_solve_listener(backend):
+    seen = []
+    listener = S.add_solve_listener(lambda model: seen.append((model.name, model.status)))
+    try:
+        m = S.MILP("listen", backend=backend)
+        x = m.add_var(vtype="I", ub=4)
+        m.add_constr(x <= 2.5)
+        m.set_objective(x, minimize=False)
+        m.params["gurobi"]["Heuristics"] = 0.5        # each backend reads only its own entry
+        m.params["highs"]["mip_heuristic_effort"] = 0.3
+        assert m.optimize() == S.OPTIMAL and m.obj_value == pytest.approx(2.0)
+    finally:
+        S.remove_solve_listener(listener)
+    assert seen == [("listen", S.OPTIMAL)]
+
+
+@pytest.mark.parametrize("backend", [b for b in BACKENDS if b.values[0] != "scipy"])
+def test_partial_warm_start(backend):
+    m = S.MILP("ws", backend=backend)
+    x = [m.add_var(vtype="B") for _ in range(4)]
+    m.add_constr(S.quicksum(x) == 2)
+    m.set_objective(S.quicksum((k + 1) * v for k, v in enumerate(x)))
+    m.set_start(x[3], 1.0)  # only one value given; the solver completes the start
+    assert m.optimize() == S.OPTIMAL and m.obj_value == pytest.approx(3.0)

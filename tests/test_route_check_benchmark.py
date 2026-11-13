@@ -1,4 +1,4 @@
-"""The refill DP against the street MIP on a Solomon benchmark instance (needs gurobipy)."""
+"""The refill DP against the street MIP on a Solomon benchmark instance (free HiGHS solver; Gurobi with MIP_SOLVER=gurobi)."""
 import io
 import contextlib
 import os
@@ -9,7 +9,7 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-pytest.importorskip("gurobipy")
+pytest.importorskip("highspy")
 import instanceGenerator  # noqa: E402
 import MathModels  # noqa: E402
 import Repair_heuristcs as RH  # noqa: E402

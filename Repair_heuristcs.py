@@ -93,7 +93,7 @@ REFILL_RULE = "two_way"
 
 #tolerance of the time-window checks of the refill DPs: arrivals are sums of Euclidean travel
 #times, so an arrival exactly at the window end can come out 1e-13 too late (the street MIP
-#accepts it within Gurobi's feasibility tolerance)
+#accepts it within the MIP solver's feasibility tolerance)
 TIME_EPS = 1e-9
 
 def refill_points(problem_instance, route):

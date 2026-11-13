@@ -2,13 +2,9 @@ import os
 import io
 import numpy
 import math 
-from gurobipy import *
-from gurobipy import GRB
 import time
+from twoe.solver import MILP, LinExpr, quicksum
 import MathModels
-from gurobipy import quicksum
-from gurobipy import Model
-from gurobipy import LinExpr
 
 bigNumber = 100000
 def get_routes(problem, arcs):
@@ -48,7 +44,7 @@ def get_routes(problem, arcs):
         exit()
     return routes
 def water_problem_MIP(problem,tasks, route_list,  SE_cost): 
-    model = Model("water_problem_MIP")
+    model = MILP("water_problem_MIP")
 
     model._route_given = route_list
     add_assignment_constraints(problem, model, tasks) #VRP
@@ -61,21 +57,22 @@ def water_problem_MIP(problem,tasks, route_list,  SE_cost):
      
 def solve_MIP(problem, model, tasks,SE_cost, timelimit):
     start_mip = time.time()
-    #model.setParam("MIPGap", 0.001)
-    model.setParam('Heuristics', 0.75)
-    model.Params.OutputFlag = 0
-    model.Params.TimeLimit = timelimit
-    model.Params.Cutoff = problem.cutoff - 1 -SE_cost
+    model.params["gurobi"]["Heuristics"] = MathModels.GUROBI_HEURISTICS
+    model.verbose = False
+    model.time_limit = timelimit
+    cutoff = problem.cutoff - 1 - SE_cost
+    model.cutoff = cutoff if math.isfinite(cutoff) else None
     model.optimize()
     solution_time_mip = time.time() - start_mip
     #model.write("FEV_MIP.lp")
     
     #get the optimal if exists
-    if model.SolCount > 0:
-        mip_gap = model.MIPGap
+    if model.has_solution:
+        val = model.value
+        mip_gap = model.gap
         #assignments
-        fleet = round(model._nofVessels.x,0)
-        used_arcs  = [[i,j] for [i,j] in model._arcList if model._xij[i,j].x>0.1]
+        fleet = round(val(model._nofVessels),0)
+        used_arcs  = [[i,j] for [i,j] in model._arcList if val(model._xij[i,j])>0.1]
         
         locations_arcs = []
         for [i,j] in used_arcs:
@@ -93,10 +90,9 @@ def solve_MIP(problem, model, tasks,SE_cost, timelimit):
                 taskj_satellite = [task for task in tasks if task.transfer_point == j][0]
                 loc_j = taskj_satellite.index
                 locations_arcs.append([loc_i, loc_j])
-        obj = model.getObjective()        
-        obj_value = obj.getValue()
-        fixed_vehicle_cost = model._fixed_vehicle_cost.x 
-        distance_travel_cost = model._distance_travel_cost.x
+        obj_value = model.obj_value
+        fixed_vehicle_cost = val(model._fixed_vehicle_cost)
+        distance_travel_cost = val(model._distance_travel_cost)
 
         return True, obj_value, fleet, distance_travel_cost, used_arcs, locations_arcs
 
@@ -130,39 +126,39 @@ def add_synchronzation_constraints(problem, model, tasks, route_list):
         if i in seen_list:
             continue
         seen_list.append(i)
-        h[i] = model.addVar(lb=problem.nodes[i].start_interval,ub=problem.nodes[i].end_interval, vtype=GRB.CONTINUOUS, name="h"+str(i))
+        h[i] = model.add_var(lb=problem.nodes[i].start_interval,ub=problem.nodes[i].end_interval, vtype="C", name="h"+str(i))
           
 
-    model.update()
+
     #adjusting time for SEVs should comply with tws
     for [i,j] in arcList_SEVs:
         if j not in transshipment_points:
             if j == 0:
-                model.addConstr(h[i] + problem.nodes[i].unloading_time +problem.travel_matrix[i][j]  <= problem.nodes[0].end_interval)
+                model.add_constr(h[i] + problem.nodes[i].unloading_time +problem.travel_matrix[i][j]  <= problem.nodes[0].end_interval)
             else:
-                model.addConstr(h[i] + problem.nodes[i].unloading_time + problem.travel_matrix[i][j]  <= h[j])
+                model.add_constr(h[i] + problem.nodes[i].unloading_time + problem.travel_matrix[i][j]  <= h[j])
         else:            
             satellite_chosen = [task for task in tasks if task.transfer_point == j][0]
             delay_j = problem.travel_matrix[i][satellite_chosen.index] + problem.travel_matrix[satellite_chosen.index][j]
-            model.addConstr(h[i] + problem.nodes[i].unloading_time +problem.TransferDuration + delay_j  <= h[j])
+            model.add_constr(h[i] + problem.nodes[i].unloading_time +problem.TransferDuration + delay_j  <= h[j])
             
 
     for j in transshipment_points:
         satellite_chosen = [task for task in tasks if task.transfer_point == j][0]  
         prev_node = next(ii for [ii,jj] in arcList_SEVs if jj == j) 
        
-        model.addConstr(u[j] >= h[prev_node] + problem.nodes[prev_node].unloading_time + problem.travel_matrix[prev_node][satellite_chosen.index], name = "lower_bound"+str(satellite_chosen.index)+"."+str(j))
-        model.addConstr(u[j] +problem.TransferDuration +problem.travel_matrix[satellite_chosen.index][j] <= h[j], name = "upper_bound"+str(satellite_chosen.index)+"."+str(j))
+        model.add_constr(u[j] >= h[prev_node] + problem.nodes[prev_node].unloading_time + problem.travel_matrix[prev_node][satellite_chosen.index], name = "lower_bound"+str(satellite_chosen.index)+"."+str(j))
+        model.add_constr(u[j] +problem.TransferDuration +problem.travel_matrix[satellite_chosen.index][j] <= h[j], name = "upper_bound"+str(satellite_chosen.index)+"."+str(j))
             
     model._h = h
-    model.update()
+
     return 
 def add_objective(problem, model,tasks):
-    fixed_vehicle_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="fixed_vehicle_cost") #number of cars 
-    distance_travel_cost=model.addVar(lb=0,ub=math.inf, vtype=GRB.CONTINUOUS,name="distance_travel_cost") 
-    model.update()
+    fixed_vehicle_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="fixed_vehicle_cost") #number of cars 
+    distance_travel_cost=model.add_var(lb=0,ub=math.inf, vtype="C",name="distance_travel_cost") 
 
-    model.addConstr(fixed_vehicle_cost>=model._nofVessels*problem.cost_vehicle_use_FEV) #fixed, beta^w 
+
+    model.add_constr(fixed_vehicle_cost>=model._nofVessels*problem.cost_vehicle_use_FEV) #fixed, beta^w 
     
     exp = LinExpr()
     
@@ -170,28 +166,27 @@ def add_objective(problem, model,tasks):
         i = taski.transfer_point
         loc_i = taski.index
         if [problem.CDC.index,i] in model._arcList:
-            exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[problem.CDC.index][loc_i], model._xij[problem.CDC.index,i])
+            exp.add_term(model._xij[problem.CDC.index,i], problem.cost_unit_travel_FEV*problem.DistMatrix[problem.CDC.index][loc_i])
         if [i,problem.CDC.index] in model._arcList:
-            exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][problem.CDC.index], model._xij[i,problem.CDC.index])
+            exp.add_term(model._xij[i,problem.CDC.index], problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][problem.CDC.index])
         
         for taskj in tasks:
             j = taskj.transfer_point
             loc_j = taskj.index
             if [i,j] in model._arcList:
-                exp.addTerms(problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][loc_j], model._xij[i,j])
+                exp.add_term(model._xij[i,j], problem.cost_unit_travel_FEV*problem.DistMatrix[loc_i][loc_j])
             if loc_i != loc_j:
-                model._xij[i,j].Start = 0
+                model.set_start(model._xij[i,j], 0)
 
-    model.addConstr(distance_travel_cost >= exp) #fixed
+    model.add_constr(distance_travel_cost >= exp) #fixed
     
 
-    model.setObjective(fixed_vehicle_cost + distance_travel_cost, GRB.MINIMIZE)
+    model.set_objective(fixed_vehicle_cost + distance_travel_cost)
 
-    model.setParam('OutputFlag', 1)
-    model.setParam("MIPGap", 0.0)
+    model.mip_gap = 0.0
     model._fixed_vehicle_cost = fixed_vehicle_cost
     model._distance_travel_cost = distance_travel_cost
-    model.update()    
+
 
     return
 def add_temporal_constraints(problem, model, tasks):
@@ -221,27 +216,27 @@ def add_temporal_constraints(problem, model, tasks):
         else:
             lb_u = problem.CDC.start_interval if problem.CDC.start_interval > -math.inf else -horizon
             ub_u = horizon
-        u[i] = model.addVar(lb=lb_u,ub=ub_u, vtype=GRB.CONTINUOUS, name="u"+str(i))
+        u[i] = model.add_var(lb=lb_u,ub=ub_u, vtype="C", name="u"+str(i))
         
-    model.update()
+
     #service start times flowing #Const8
     #big-M of arc (i,j) from the bounds of u: M_ij = ub(u_i) + s_i + t_ij + transfer - lb(u_j)
                 
     for taski in tasks:
         i = taski.index
         transfer_i = taski.transfer_point
-        #model.addConstr(u[transfer_i] >= problem.travel_matrix[problem.CDC.index][i] ) 
+        #model.add_constr(u[transfer_i] >= problem.travel_matrix[problem.CDC.index][i] ) 
         for taskj in tasks:
             j = taskj.index
             transfer_j = taskj.transfer_point
             if [transfer_i,transfer_j] in arcList:                    
                 bigNumberTime = max(0, u[transfer_i].ub + problem.network[i].unloading_time + problem.travel_matrix[i][j]
                                     + problem.TransferDuration - u[transfer_j].lb)
-                model.addConstr(u[transfer_i] + problem.network[i].unloading_time  + problem.travel_matrix[i][j]*xij[transfer_i,transfer_j] #service ends
+                model.add_constr(u[transfer_i] + problem.network[i].unloading_time  + problem.travel_matrix[i][j]*xij[transfer_i,transfer_j] #service ends
                                 + problem.TransferDuration  <= u[transfer_j] + bigNumberTime*(1 - xij[transfer_i,transfer_j])) #transfer ends
 
     model._u = u
-    model.update()
+
 
     return
 def  add_capacity_constraints_load(problem, model, tasks) :
@@ -252,17 +247,17 @@ def  add_capacity_constraints_load(problem, model, tasks) :
     m = {} #load on car
     for task in tasks:
         i = task.transfer_point
-        m[i] = model.addVar(lb=0,ub=problem.capacity_FEV - task.demand, vtype=GRB.CONTINUOUS, name="m"+str(i)) #load level at the departure at customer i
-    model.update()
+        m[i] = model.add_var(lb=0,ub=problem.capacity_FEV - task.demand, vtype="C", name="m"+str(i)) #load level at the departure at customer i
+
 
     for taski in tasks:
         i = taski.transfer_point
         for taskj in tasks:
             j = taskj.transfer_point
             if [i,j] in arcList:
-                model.addConstr(m[i] >= m[j] + taskj.demand - problem.capacity_FEV*(1 - xij[i,j] ))
+                model.add_constr(m[i] >= m[j] + taskj.demand - problem.capacity_FEV*(1 - xij[i,j] ))
     model._m = m
-    model.update()
+
     return
 def add_assignment_constraints(problem, model, tasks):
     if len(tasks) == 0:
@@ -277,7 +272,7 @@ def add_assignment_constraints(problem, model, tasks):
 
     #add assignment const
     xij = {} #street route
-    nofCars = model.addVar(lb=1,ub=len(tasks), vtype=GRB.INTEGER, name = "nofCars")
+    nofCars = model.add_var(lb=1,ub=len(tasks), vtype="I", name = "nofCars")
     arcList = []
     
     kk = False
@@ -290,30 +285,30 @@ def add_assignment_constraints(problem, model, tasks):
                 if i==j:
                     continue              
                         
-                xij[i,j]=model.addVar (vtype=GRB.BINARY, name="x."+str(i)+"."+str(j))                
+                xij[i,j]=model.add_var(vtype="B", name="x."+str(i)+"."+str(j))                
                 arcList.append([i,j])
-    model.update()         
+
 
      #---Part 1----- Street level routing Problem Constraints 
     #assignment const
     for taski in tasks:
         i = taski.transfer_point
-        model.addConstr(quicksum(xij[i,j] for j in vertices if [i,j] in arcList)==1, "outflow."+str(i)) #Const2
-        model.addConstr(quicksum(xij[j,i] for j in vertices if [j,i] in arcList)==1,"inflow."+str(i)) #Const2
+        model.add_constr(quicksum(xij[i,j] for j in vertices if [i,j] in arcList)==1, "outflow."+str(i)) #Const2
+        model.add_constr(quicksum(xij[j,i] for j in vertices if [j,i] in arcList)==1,"inflow."+str(i)) #Const2
     
     #fleet size and  #flow balance at the depot (garage for street vehicles)
-    model.addConstr(quicksum(xij[taski.transfer_point, problem.CDC.index] for taski in tasks if [taski.transfer_point,problem.CDC.index] in arcList) == nofCars) #Const3
+    model.add_constr(quicksum(xij[taski.transfer_point, problem.CDC.index] for taski in tasks if [taski.transfer_point,problem.CDC.index] in arcList) == nofCars) #Const3
     min_nofCars = math.ceil(sum(taski.demand for taski in tasks)/ problem.capacity_FEV)
-    model.addConstr(nofCars >= min_nofCars)
+    model.add_constr(nofCars >= min_nofCars)
 
     leaving = [[i,j] for [i,j] in arcList if i==problem.CDC.index] 
     returning = [[i,j] for [i,j] in arcList if j==problem.CDC.index]
-    model.addConstr(quicksum(xij[i,j] for [i,j] in leaving ) - quicksum(xij[i,j] for [i,j] in returning) == 0) #Const3 
+    model.add_constr(quicksum(xij[i,j] for [i,j] in leaving ) - quicksum(xij[i,j] for [i,j] in returning) == 0) #Const3 
 
     model._arcList = arcList
     model._vertices = vertices
     model._xij = xij
     model._nofVessels = nofCars
 
-    model.update()
+
     return
