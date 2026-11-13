@@ -36,8 +36,6 @@ LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during t
 MIP_SOLVER = None          # None: environment variable MIP_SOLVER, else the free HiGHS solver; "highs", "gurobi" (second option) or "scipy"
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
-COST_SETTING = "paper"     # "paper": costs of Karademir et al. (EJOR 2025) Sec. 5.1 with the ratio WLS; "code": 10000 constants
-WLS = 0.1                  # water level significance alpha (WLS 1:10 -> 0.1): c^w = alpha c^s, beta^w = alpha beta
 ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" (cheapest, any number) or "optimal" (exactly the capacity minimum m)
 CROSS_CHECK_MIP = True     # step 2a also solves the street MIP of every stored route and compares
@@ -313,8 +311,7 @@ def build_problem(instance_name: str, reports: dict):
     """Generate the instance and set the run parameters (shared by every stage)."""
     if BENCHMARK_MODE:
         problem = instanceGenerator.readGenerate_benchmark(instance_name, 100,
-                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME,
-                                                           cost_setting=COST_SETTING, wls=WLS)
+                                                           unbounded_vehicle_time=UNBOUNDED_VEHICLE_TIME)
     else:
         problem = instanceGenerator.read_generate_case(
             DEMAND_SET_INDEX, nof_horeca=1600, nof_satellites=N_SATELLITES,
@@ -362,7 +359,7 @@ def run_initial_construction(instance_name: str, reports: dict):
     emit(f"customers {len(problem.customers)}, satellites {len(problem.satellites)}, "
          f"SEV capacity {problem.capacity_SEV}, FEV capacity {problem.capacity_FEV}, "
          f"synchronized {problem.synch_check}")
-    emit(f"costs ({getattr(problem, 'cost_setting', 'code')}): c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
+    emit(f"costs: c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
     emit(f"MIP solver {backend}")

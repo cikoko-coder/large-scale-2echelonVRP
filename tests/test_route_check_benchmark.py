@@ -88,10 +88,10 @@ def test_free_routing_mip_routes_are_dp_feasible(problem):
 
 def test_is_route_feasible_uses_the_two_way_rule():
     """is_route_feasible (REFILL_RULE "two_way"): feasibility of the DP, cost of the plan with the
-    minimum number of transshipments K*; paper costs (no trip cost), so the cheapest plan may use more."""
+    minimum number of transshipments K*; the cheapest plan never uses fewer trips."""
     assert RH.REFILL_RULE == "two_way"
     with contextlib.redirect_stdout(io.StringIO()):
-        p = instanceGenerator.readGenerate_benchmark("rc201.txt", 100, unbounded_vehicle_time=True, cost_setting="paper")
+        p = instanceGenerator.readGenerate_benchmark("rc201.txt", 100, unbounded_vehicle_time=True)
     p.tabu_search_active = False
     rng = random.Random(5)
     customers = sorted(p.customers, key=lambda node: node.start_interval)
@@ -118,7 +118,7 @@ def test_free_mip_initializer_is_costed_by_the_two_way_check():
     multi-trip solution is costed by the two-way check and compared with the heuristic on it."""
     import Multi_level_destroy as MLD
     with contextlib.redirect_stdout(io.StringIO()):
-        p = instanceGenerator.readGenerate_benchmark("c208.txt", 100, unbounded_vehicle_time=True, cost_setting="paper")
+        p = instanceGenerator.readGenerate_benchmark("c208.txt", 100, unbounded_vehicle_time=True)
         p.tabu_search_active = False
         p.modelStartTime = time.time()
         p.points_found = []

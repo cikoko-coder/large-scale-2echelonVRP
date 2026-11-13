@@ -165,7 +165,7 @@ def two_way_transshipment_checking(problem_instance, route):
 
     Unlike optimal_transshipment_checking, no plan with more than K* trips is considered, even
     when it would be cheaper (possible when trip_unit_cost is below the detour savings, e.g. the
-    paper setting with trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
+    trip_unit_cost = 0). With trip_unit_cost = 10000 both give the same plan.
     :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
     """
     result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)

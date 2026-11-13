@@ -167,7 +167,7 @@ Parameters now follow Section 5.1 (`COST_SETTING = "paper"`, `WLS = 0.1` in the 
 | c^s = 1, c^w = alpha c^s (WLS 1:10, alpha = 0.1) | `cost_unit_travel`, `cost_unit_travel_FEV` (the water MIP now uses the FE costs) |
 | beta = max_{i,p} c^s (t_gi + t_ip + t_pg) + c^w (t_dp + t_pd), eq. (62); beta^w = alpha beta | `twoe.config.fixed_vehicle_cost`, `cost_vehicle_use`, `cost_vehicle_use_FEV` |
 | no cost per transshipment | `trip_unit_cost = 0` (the DP then also tries K > m when it saves distance) |
-| U = 2 x average service time, rounded up | `set_transfer_duration` (c: 180, r/rc: 20) |
+| benchmark instances: transfer duration U = 0 | `set_paper_costs(transfer_duration=0)` (`None` gives 2 x average service time: c 180, r/rc 20) |
 | objective (1): z^s + z^w with travel on both levels | route cost = c^s (distance + detours) + trips; two-echelon objective uses beta^w for vessels |
 
 Still different from the paper: 8 satellites from the data files (paper: 4 at proximity 0.1
@@ -271,3 +271,13 @@ r201 595.1 vs 571.7 -> the free MIP is chosen; its routes need the same number o
 transshipments under the two-way DP as in the MIP. Test
 `test_free_mip_initializer_is_costed_by_the_two_way_check`. 34 tests pass.
 The "Error in demand supply check" print in this restricted-customer mode existed before.
+
+## 10. Free MIP solver, code costs (2026-11-13)
+
+* All MIPs go through `twoe.solver`: HiGHS (free, no size limit) by default, Gurobi as the
+  second option (`MultiEchelonPipeline.MIP_SOLVER = "gurobi"` or `MIP_SOLVER=gurobi`).
+* The paper cost setting (`set_paper_costs`, `COST_SETTING`, `WLS`) is removed: the benchmark
+  runs use the original code constants (1 per travel unit, 10000 per vehicle and per
+  transshipment) and transfer duration U = 0. Section 6 above describes the removed setting.
+* Pipeline default: `INITIAL_METHOD = "heuristic+mip"`, the routing MIP warm-started with the
+  heuristic routes.
