@@ -659,7 +659,9 @@ def read_horeca_data(file_content):
 
 def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True, cost_setting = "code", wls = 0.1):
     """cost_setting "code": the constants of instance() (10000 per vehicle and per transshipment,
-    U = 0); "paper": instance.set_paper_costs(wls) (cost ratio WLS, beta of eq. 62, U)."""
+    U = 0); "paper": instance.set_paper_costs(wls) (cost ratio WLS, beta of eq. 62).
+    The transfer duration U is 0 on the benchmark instances in both settings (as in the
+    best-known solutions of data/sols: a SEV leaves the satellite at the vessel's arrival)."""
     nodes, capacity_FEV, capacity_SEV = read_vrp_data(instance_name, size)
     problem = instance(instance_name, nodes)
     problem.depot = problem.nodes[0]
@@ -683,7 +685,7 @@ def readGenerate_benchmark(instance_name, size, unbounded_vehicle_time = True, c
     problem.distance_matrix = problem.DistMatrix
 
     if cost_setting == "paper":
-        problem.set_paper_costs(wls)
+        problem.set_paper_costs(wls, transfer_duration = 0)
     else:
         problem.cost_setting = "code"
 
