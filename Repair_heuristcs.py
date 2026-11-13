@@ -169,17 +169,37 @@ def two_way_transshipment_checking(problem_instance, route):
     :return: same dict as bounded_transshipment_checking; n_trips = min_trips_on_time = K*
     """
     result = two_pass_transshipment_checking(problem_instance, route, min_trips_first = True)
+    returns_in_time(problem_instance, route, result)
     result["min_trips_on_time"] = result["n_trips"] if result["feasible"] else None
     return result
+
+def returns_in_time(problem_instance, route, result):
+    """Exact end-of-shift check of a feasible refill plan: the vehicle is back at the garage by
+    its end, finish (end of the last service) + t(last customer, garage) <= garage end. Sets
+    result["feasible"] = False (result["late_return"] = lateness) otherwise. With unbounded vehicle
+    time the garage end is far after every customer window and the check never binds.
+    :return: result["feasible"]"""
+    if result["feasible"] and route:
+        back = result["finish"] + problem_instance.travel_matrix[route[-1].index][0]
+        late = back - getattr(problem_instance.depot, "end_interval", math.inf) #no garage end: unbounded
+        if late > TIME_EPS:
+            result["feasible"] = False
+            result["late_return"] = late
+    return result["feasible"]
 
 def satellite_detour(problem_instance, i, j, matrix = "travel_matrix"):
     """(detour, satellite) of the closest satellite p on the arc i -> j: min over p of
     m(i,p) + m(p,j) - m(i,j) (ties by the smaller index), m = problem_instance.<matrix>.
-    Memoized per problem, matrix and satellite set (the route checks ask for the same arcs again
-    and again)."""
+    Memoized per problem, matrix and satellite set (consolidation swaps problem.satellites for
+    another list); the set's key is built only when the list changes, not on every call."""
     sats = problem_instance.satellites
-    memo = problem_instance.__dict__.setdefault("_satellite_detour_memo", {})
-    memo = memo.setdefault((matrix, tuple(p.index for p in sats)), {}) #consolidation swaps the satellite set
+    current = problem_instance.__dict__.setdefault("_satellite_detour_current", {})
+    entry = current.get(matrix)
+    if entry is None or entry[0] is not sats or entry[1] != len(sats):
+        memo = problem_instance.__dict__.setdefault("_satellite_detour_memo", {})
+        entry = (sats, len(sats), memo.setdefault((matrix, tuple(p.index for p in sats)), {}))
+        current[matrix] = entry
+    memo = entry[2]
     hit = memo.get((i, j))
     if hit is None:
         m = getattr(problem_instance, matrix)
@@ -985,27 +1005,13 @@ def insert_into_every_index_slack(problem_instance, input_list, item):
         if service_start > item.end_interval:
             continue
         next_arrival = service_start + item.unloading_time + problem_instance.distance_matrix[item.index][next_node.index]
-        #makespan_cost =  problem_instance.latest_times_feasible[next_node.index] - next_arrival 
-        
-        #if makespan_cost < 0:
-            #print("infeasible due to time window violation detected in slack time based insertion list generation")
-        #    continue
-            
         if next_arrival <= problem_instance.latest_times_feasible[next_node.index]:
             candidate = input_list[:i] + [item] + input_list[i:]
-
-            if get_makespan(problem_instance, candidate) > 1:
-                continue            
-            
-            makespan_cost =  max(0,problem_instance.latest_times_feasible[next_node.index] - next_arrival )
-            
             distance_cost = get_min_multi_trip_cost(problem_instance, candidate) - initial_cost            
             
             feasible_solutions.append([True, candidate, distance_cost]) 
    
-    #insertions represent the candidate route first, then objective change, then makespan change, then the cost of the route with the insertion, then the cost of the route without the insertion, then the index of insertion
-    #AT INDEX one THE ROUTE MODIFIED BY THE INSERTION
-    #AT INDEX two THE COST OF THE ROUTE WITH THE INSERTION
+    #each insertion: [True, candidate route, increase of the minimum multi-trip distance cost]
     return feasible_solutions
 
 def get_min_multi_trip_cost(problem_instance, route):
@@ -1033,62 +1039,6 @@ def get_min_multi_trip_cost(problem_instance, route):
     cost_trips =  problem_instance.trip_unit_cost*min_transfer
     
     return cost_v   + cost_trips #+ problem_instance.cost_vehicle_use
-
-def get_makespan(problem_instance, route): #check feasibility in time, use the lowet bound 
-    
-    arcs_no_trip = MathModels.generate_arcs(route)
-
-    arcs_with_trip = [satellite_detour(problem_instance, i, j, "distance_matrix")[0]
-                       for [i,j] in arcs_no_trip if j!=0]
-
-    min_transfer = math.ceil((sum([node.demand for node in route]) )/problem_instance.capacity_SEV)
-    arcs_with_trip.sort()
- 
-    #num_bins = min_transfer
-    #bin_size = len(route) // num_bins
-    #cutting_points = [i * bin_size for i in range(0, num_bins)]    
-
-    min_satellite_visit_cost =  sum(arcs_with_trip[:min_transfer]) 
-
-    #min_satellite_visit_cost =  sum(arcs_with_trip[x] for x in cutting_points) 
-
-    arc_cost = sum(problem_instance.distance_matrix[i][j] for [i,j] in arcs_no_trip)
-    service_sum = sum(x.unloading_time for x in route) + min_transfer*problem_instance.TransferDuration
-    make = min_satellite_visit_cost + arc_cost + service_sum
-
-    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
-    
-    return minSEvs
-
-def get_makespan2(problem_instance, route):
-    
-    distances = [problem_instance.distance_matrix[route[i].index][route[i + 1].index] for i in range(len(route) - 1)]
-    distances.append(problem_instance.distance_matrix[route[-1].index][0])  
-    distances.append(problem_instance.distance_matrix[0][route[0].index])  
-    dist_sum = sum(distances)
-    service_sum = sum(x.unloading_time for x in route)
-    make = dist_sum + service_sum
-    
-    minSEvs = math.ceil(make/(problem_instance.nodes[0].end_interval - problem_instance.nodes[0].start_interval)) #length of the vehicle horizon
-
-    return minSEvs
-
-def divide_routes(problem_instance, route, minSEVS):
-    routes = []
-    node_list = [copy.deepcopy(x) for x in route]
-    for i in range(minSEVS):
-        route = []
-        for node in node_list:
-            route.append(node)
-            nof_sev = get_makespan(problem_instance, route)
-            if nof_sev >1:
-                route.remove(node)
-                routes.append(copy.deepcopy(route))
-                break
-            else:
-                node_list.remove(node)
-                
-    return routes
 
 def update_intervals(problem_instance, routes):
     problem_instance.earliest_times_feasible = [problem_instance.depot.start_interval]*(len(problem_instance.nodes))
@@ -1164,8 +1114,6 @@ def is_in_tabu_list(problem_instance, route):
 def is_route_feasible(problem_instance, route):      
            
     
-    if get_makespan(problem_instance, route) > 1:
-        return False, route, BigNumber
     if is_in_tabu_list(problem_instance, route):
         return False, route, BigNumber
     
@@ -1185,10 +1133,10 @@ def is_route_feasible(problem_instance, route):
             optimal = bothway_optimal_checking(problem_instance, route)
         else:
             optimal = optimal_transshipment_checking(problem_instance, route)
+        if REFILL_RULE != "two_way": #two_way_transshipment_checking checks the return itself
+            returns_in_time(problem_instance, route, optimal)
         if not optimal["feasible"]:
             return False, route, BigNumber
-        #the street MIP has no constraint on the return to the garage, so the finish time of the
-        #plan is not checked against the garage end (unbounded vehicle time)
         if ROUTE_CHECK == "mip":
             feas, cost, visits, route_return = check_route_transshipments(problem_instance, route)
             return feas, route, cost

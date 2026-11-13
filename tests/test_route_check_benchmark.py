@@ -100,8 +100,6 @@ def test_is_route_feasible_uses_the_two_way_rule():
         size = rng.randint(2, 15)
         start = rng.randint(0, len(customers) - size)
         route = customers[start:start + size]
-        if RH.get_makespan(p, route) > 1:
-            continue
         two_way = RH.two_way_transshipment_checking(p, route)
         feasible, _, cost = RH.is_route_feasible(p, route)
         assert feasible == two_way["feasible"]
@@ -111,3 +109,24 @@ def test_is_route_feasible_uses_the_two_way_rule():
             cheapest = RH.optimal_transshipment_checking(p, route)
             assert cheapest["n_trips"] >= two_way["n_trips"] and cheapest["cost"] <= two_way["cost"] + 1e-6
     assert checked >= 20
+
+
+def test_route_must_return_to_the_garage_in_time(problem):
+    """The two-way check rejects a plan that ends after the garage closes (bounded vehicle time),
+    the exact replacement of the old makespan bound."""
+    p = problem
+    p.tabu_search_active = False
+    route = sorted(p.customers, key=lambda node: node.start_interval)[:5]
+    plan = RH.two_way_transshipment_checking(p, route)
+    assert plan["feasible"]
+    back = plan["finish"] + p.travel_matrix[route[-1].index][0]
+    end = p.depot.end_interval
+    try:
+        p.depot.end_interval = back + 1.0
+        assert RH.two_way_transshipment_checking(p, route)["feasible"]
+        p.depot.end_interval = back - 1.0
+        late = RH.two_way_transshipment_checking(p, route)
+        assert not late["feasible"] and late["late_return"] == pytest.approx(1.0)
+        assert not RH.is_route_feasible(p, route)[0]
+    finally:
+        p.depot.end_interval = end

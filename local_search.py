@@ -14,7 +14,7 @@ perform_N_two_point_crossover / one_point_crossover):
 
 Two-way check. A move is accepted only if both new routes pass the exact route check of the
 two-way rule (RH.two_way_transshipment_checking: the minimum number of on-time transshipments K*,
-then the cheapest plan with K*), the horizon bound (RH.get_makespan) and the tabu list, i.e. the
+then the cheapest plan with K*, the vehicle back at the garage in time) and the tabu list, i.e. the
 same rule as RH.is_route_feasible with REFILL_RULE = "two_way". The cost compared is the two-way
 cost of RH.two_way_solution_cost: vehicle use + c^s (distance + detours) + trip_unit_cost per trip,
 so a move that empties a route gains the vehicle cost.
@@ -75,7 +75,7 @@ class RouteEvaluator:
             return hit
         self.dp_runs += 1
         p = self.problem
-        if RH.get_makespan(p, route) > 1 or RH.is_in_tabu_list(p, route):
+        if RH.is_in_tabu_list(p, route):
             out = (False, RH.BigNumber)
         else:
             plan = RH.two_way_transshipment_checking(p, route)

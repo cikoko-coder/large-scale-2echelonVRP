@@ -533,7 +533,7 @@ def get_initial_solution(problem_instance, nof_initializations = 1, read_initial
 
 def write_out_all_initials(problem_instance, runtime):
     #write out all initial solutions
-    path = "init_solutions_makespan_" + str(problem_instance.name) +"_"+str(len(problem_instance.customers))+ ".txt"
+    path = "init_solutions_" + str(problem_instance.name) +"_"+str(len(problem_instance.customers))+ ".txt"
 
     with open(path, 'w') as file:
         for sol_array in problem_instance.heuristics_solutions:
