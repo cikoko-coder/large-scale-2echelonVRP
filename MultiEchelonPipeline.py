@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import random
 import collections
 from datetime import date
 # The heuristics (Repair_heuristcs, SEVs) build their nodes and read
@@ -11,38 +12,42 @@ import Multi_level_destroy as MLD
 import Repair_heuristcs as RH
 import local_search as LS
 
-# Solution procedure (run_instance):
-#   1  initial solution: multi-start insertion (START_CONS starts), transshipments by the DP
-#   1+ local search: relocate + 2-opt* descent, two-way check (local_search.py)
-#   2  ITS: ITS_ITERATIONS rounds of ALNS (alns.py) + local search, each round restarts from the
-#      best solution so far with a new seed; stops after ITS_STAGNATION rounds without improvement
-#   3  FE solution optimization: the FE_CANDIDATES best stored route sets (two-way cost) go
-#      through check_found_solutions (multi-trip / MVRP check, water MIP, consolidation)
-#   4  report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
+# Solution procedure (run_instance): the Iterated Tabu Search of the manuscript (Section 5, Figure 4)
+#   ITS iteration k = 1..N_ITS (Multi_level_destroy.Solve_by_decomposition, its_iter = k):
+#     k = 1: Init (multi-start greedy insertion, N_INIT starts) and local search (relocate +
+#            crossover, R_LS repetitions) on the best initial solution
+#     every k: ALNS (MLD destroy + the single repair RH.k_best_insertion_repair, N_ALNS iterations)
+#            from R*, local search on the best ALNS solution (N_LS * k: intensification grows with k),
+#            tabu list update + repair of the found schedules; R* = fewest SEVs, then two-way cost
+#   FE optimization (Multi_level_destroy.Optimize_FE): the min-fleet SE solutions (at most
+#     FE_CANDIDATES) -> FE routing MILP + satellite-removal consolidation (check_found_solutions)
+#   report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
 
 # --- CONFIGURATION ---
 BENCHMARK_MODE = True
 DEMAND_SET_INDEX = 1
 N_SATELLITES = 8
-START_CONS = 2
 IS_SYNCHRONIZED = True
-TABU_SEARCH_ACTIVE = False
+TABU_SEARCH_ACTIVE = True  # tabu list T of infeasible routes (route-level exact check)
 INSTANCES_TO_RUN = ["c201.txt", "c208.txt", "r201.txt", "r208.txt", "rc201.txt", "rc208.txt"]
 
-RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter); ITS round k uses seed RANDOM_SEED + k
+# ITS parameters (manuscript Section 6.1)
+N_INIT = 5                 # starts of the multi-start initialization
+N_ITS = 5                  # ITS iterations
+R_LS = 5                   # maximum repetitions of the local search
+N_LS = 500                 # local search iterations (times the ITS iteration k)
+N_ALNS = 500               # ALNS iterations per ITS iteration
+SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
+FE_CANDIDATES = 10         # min-fleet SE solutions sent to the FE MILP (None: all of them)
+
+RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)
 LOG_MIP_CALLS = True       # count every MIP solve (model name, status) during the run
 MIP_SOLVER = None          # None: environment variable MIP_SOLVER, else the free HiGHS solver; "highs", "gurobi" or "scipy"
 OUTPUT_DIR = "results"     # reports, solution files and plots are written here
 UNBOUNDED_VEHICLE_TIME = True  # vehicles free in time; customer time windows bound the operations
-ROUTE_CHECK = "dp"         # per-route transshipment check: "dp" (refill DP) or "mip" (street MIP)
+ROUTE_CHECK = "dp"         # route-level exact check: "dp" (two-way refill DP) or "mip" (street MIP of the fixed route)
 REFILL_RULE = "two_way"    # route check rule: "two_way" (minimum transshipments K*, then cheapest), "optimal_cost" or "optimal"
-REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, not only the best one
-LOCAL_SEARCH_INITIAL = True  # step 1+
-ITS_ITERATIONS = 4         # step 2: rounds of ALNS + local search (0: no ITS)
-ITS_STAGNATION = 2         # stop after this many rounds without improvement
-ALNS_ITERATIONS = 500      # per ITS round
-ALNS_TIME_LIMIT = 60       # seconds per ITS round (None: iterations only)
-FE_CANDIDATES = 10         # step 3: route sets sent to the FE optimization (None: all stored)
+REPAIR_ALL_STARTS = True   # initialization: MVRP-repair and store every start, not only the best one
 
 # --- HELPER FUNCTIONS ---
 
@@ -159,22 +164,6 @@ def build_problem(instance_name: str, reports: dict):
     return problem
 
 
-def select_fe_candidates(problem, n):
-    """Keep the n stored route sets (problem.heuristics_solutions) with the smallest two-way cost
-    (feasible ones only); None keeps all. :return: number of route sets kept"""
-    if n is None:
-        return len(problem.heuristics_solutions)
-    ranked = []
-    for sequences in problem.heuristics_solutions:
-        routes = [[problem.nodes[x] for x in sequence] for sequence in sequences]
-        two_way = RH.two_way_solution_cost(problem, routes)
-        if two_way["feasible"]:
-            ranked.append((two_way["cost"], len(sequences), sequences))
-    ranked.sort(key=lambda x: (x[0], x[1]))
-    problem.heuristics_solutions = [sequences for _, _, sequences in ranked[:n]]
-    return len(problem.heuristics_solutions)
-
-
 def solution_figures(problem, solution):
     """SEVs / FEVs / trips, street (distance + detours), water, distance, objective of a two-echelon solution."""
     if solution is None:
@@ -186,9 +175,9 @@ def solution_figures(problem, solution):
             "distance": round(street + solution.travelWater, 2), "objective": round(solution.objective, 2)}
 
 
-SUMMARY_COLUMNS = ["instance", "customers", "initial_two_way", "ls_two_way", "its_two_way", "its_rounds",
-                   "feasible", "sevs", "fevs", "trips", "street", "water", "distance", "objective",
-                   "time_initial", "time_ls", "time_its", "time_fe", "time_total"]
+SUMMARY_COLUMNS = ["instance", "customers", "init_sevs", "init_two_way", "init_ls_sevs", "init_ls_two_way",
+                   "its_sevs", "its_two_way", "fe_candidates", "feasible", "sevs", "fevs", "trips", "street",
+                   "water", "distance", "objective", "time_init", "time_its", "time_fe", "time_total"]
 
 
 def write_summary(row):
@@ -201,17 +190,30 @@ def write_summary(row):
         f.write(",".join(str(row.get(c, "")) for c in SUMMARY_COLUMNS) + "\n")
 
 
-def run_instance(instance_name: str, reports: dict):
-    """Solve one instance: initial solution + local search, ITS (ALNS + local search),
-    FE solution optimization, report (see the procedure at the top of the file).
-    :return: (problem, final two-echelon solution or None, summary row)"""
-    import random
+def format_key(key):
+    return f"{key[0]} SEVs, two-way cost {round(key[1], 1)}" if key else "-"
 
+
+def format_alns(report):
+    used, scores = report["used"], report["scores"]
+    levels = "; ".join(f"{level}: " + ", ".join(f"{o} used {used[level][o]} score {round(scores[level][o], 1)}"
+                                                for o in used[level]) for level in ("roulette", "removal", "size"))
+    return (f"ALNS {report['iterations']} iterations (temperature {round(report['temperature'], 2)}): "
+            f"{format_key(report['start_key'])} -> best {format_key(report['best_key'])} at iteration {report['best_iteration']}; "
+            f"accepted improving {report['accepted_improving']}, worse (SA) {report['accepted_worse']}, "
+            f"aspiration {report['aspiration']}, rejected {report['rejected']}, infeasible {report['infeasible']}\n"
+            f"      MLD {levels}")
+
+
+def run_instance(instance_name: str, reports: dict):
+    """Solve one instance by the ITS (procedure at the top of the file).
+    :return: (problem, final two-echelon solution or None, summary row)"""
     backend = configure_mip_solver()
     mip_log = enable_mip_logging() if LOG_MIP_CALLS else None
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
+    MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     out = []
 
     def emit(text=""):
@@ -225,96 +227,63 @@ def run_instance(instance_name: str, reports: dict):
     emit(f"costs: c^s {problem.cost_unit_travel}, c^w {round(problem.cost_unit_travel_FEV, 4)}, "
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
-    emit(f"MIP solver {backend} (water MIP time limit {problem.timelimit_FEmodel}s, min vessels bound {problem.minVessel_bound})")
+    emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
+         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}")
+    emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), up to {FE_CANDIDATES} min-fleet SE solutions")
     removed = instanceGenerator.check_feasibility_all_nodes(problem)
     emit(f"customers infeasible on their own: {removed if removed else 'none'}")
 
     # time required for building the problem is not counted
     problem.modelStartTime = time.time()
-    problem.its_iter = 1
-    random.seed(RANDOM_SEED + problem.its_iter)
     problem.customers = [node for node in problem.nodes if node.index > 0]
+    problem.best_SE = None
+    problem.its_log = []
     row = {"instance": instance_name.split(".")[0], "customers": len(problem.customers)}
 
-    # --- step 1: initial solution ------------------------------------------------
-    t = time.time()
-    best = MLD.multi_start_initial(problem, START_CONS, report_initials=True)
-    MLD.set_two_way_cost(problem, best)
-    row["time_initial"] = round(time.time() - t, 2)
-    row["initial_two_way"] = round(best.two_way_cost, 1)
-    emit("")
-    emit(f"--- step 1: multi-start construction ({START_CONS} starts): {row['time_initial']:.2f}s")
-    for k, sol in enumerate(getattr(problem, "constructed_solutions", [])):
-        MLD.set_two_way_cost(problem, sol)
-        emit(f"  start {k}: {'feasible' if sol.is_feasible else 'INFEASIBLE'}, {sol.nSEVs} SEVs, "
-             f"{len(getattr(sol, 'trips', []))} trips, two-way cost {round(sol.two_way_cost, 1)}")
-    emit(describe_solution(problem, best, "initial multi-trip solution (street level)"))
-    if not best.is_feasible:
-        emit("NOTE: the initial solution is not feasible; local search and ITS are skipped")
-
-    # --- step 1+: local search ---------------------------------------------------
-    t = time.time()
-    if LOCAL_SEARCH_INITIAL:
-        best, report = MLD.local_search_initial(problem, best, seed=RANDOM_SEED)
-        emit("")
-        emit(f"--- step 1+: local search (relocate + 2-opt*, two-way check): {time.time() - t:.2f}s")
-        if report is not None:
-            emit("  " + LS.format_report(report))
-    row["time_ls"] = round(time.time() - t, 2)
-    row["ls_two_way"] = round(best.two_way_cost, 1)
-
-    # --- step 2: ITS (ALNS + local search) ----------------------------------------
-    t = time.time()
-    rounds, stagnation = 0, 0
-    if ITS_ITERATIONS and best.is_feasible:
-        emit("")
-        emit(f"--- step 2: ITS, at most {ITS_ITERATIONS} rounds of ALNS ({ALNS_ITERATIONS} iterations, "
-             f"{ALNS_TIME_LIMIT}s) + local search, stop after {ITS_STAGNATION} rounds without improvement")
-    for k in range(1, ITS_ITERATIONS + 1):
-        if not best.is_feasible:
-            break
-        rounds = k
+    # --- ITS on the SE level --------------------------------------------------------
+    t_its = time.time()
+    for k in range(1, N_ITS + 1):
         problem.its_iter = k
-        t_round = time.time()
-        candidate, alns_report = MLD.alns_improve(problem, best, seed=RANDOM_SEED + k,
-                                                  iterations=ALNS_ITERATIONS, time_limit=ALNS_TIME_LIMIT)
-        candidate, ls_report = MLD.local_search_initial(problem, candidate, seed=RANDOM_SEED + k)
-        improved = candidate.is_feasible and candidate.two_way_cost < best.two_way_cost - LS.MIN_GAIN
-        emit(f"  round {k}: two-way cost {round(best.two_way_cost, 1)} -> {round(candidate.two_way_cost, 1)}, "
-             f"{candidate.nSEVs} SEVs, {time.time() - t_round:.1f}s{'' if improved else ' (no improvement)'}")
-        emit("    ALNS " + MLD.ALNS.format_report(alns_report).replace("\n", "\n    "))
-        if ls_report is not None:
-            emit("    local search " + LS.format_report(ls_report))
-        if improved:
-            best, stagnation = candidate, 0
-        else:
-            stagnation += 1
-            if stagnation >= ITS_STAGNATION:
-                break
-    row["time_its"] = round(time.time() - t, 2)
-    row["its_two_way"] = round(best.two_way_cost, 1)
-    row["its_rounds"] = rounds
-    emit(describe_solution(problem, best, "best multi-trip solution after the ITS (street level)"))
+        MLD.Solve_by_decomposition(RANDOM_SEED, problem, N_INIT, R_LS, k*N_LS, N_ALNS)
+        log = problem.its_log[-1]
+        emit("")
+        emit(f"--- ITS iteration {k}: {log['time']:.1f}s, R* {format_key(problem.best_SE_key)} "
+             f"(from {problem.best_SE_phase}), tabu list {log['tabu_list']} routes")
+        if "init" in log:
+            emit(f"  init ({N_INIT} starts): {log['init']['time']:.1f}s, best {format_key(log['init']['key'])}")
+            emit(f"  local search on the initial solution: {log['init_ls']['time']:.1f}s, "
+                 f"R* {format_key(log['init_ls']['key'])}; {LS.format_report(log['init_ls_report'])}")
+            row["time_init"] = round(log["init"]["time"] + log["init_ls"]["time"], 2)
+            row["init_sevs"], row["init_two_way"] = log["init"]["key"][0], round(log["init"]["key"][1], 1)
+            row["init_ls_sevs"], row["init_ls_two_way"] = log["init_ls"]["key"][0], round(log["init_ls"]["key"][1], 1)
+        emit(f"  {format_alns(log['alns_report'])}")
+        emit(f"  ALNS {log['alns']['time']:.1f}s, {log['alns']['stored']} new solutions stored")
+        emit(f"  local search on the best ALNS solution + neighborhood processing: {log['ls']['time']:.1f}s; "
+             f"{LS.format_report(log['ls_report'])}")
+    row["time_its"] = round(time.time() - t_its - row.get("time_init", 0), 2)
+    row["its_sevs"], row["its_two_way"] = problem.best_SE_key[0], round(problem.best_SE_key[1], 1)
+    emit("")
+    emit(describe_solution(problem, problem.best_SE, "R* after the ITS (multi-trip SE solution)"))
 
-    # --- step 3: FE solution optimization ------------------------------------------
+    # --- FE optimization (MILP) ------------------------------------------------------
     n_mip = len(mip_log) if mip_log is not None else 0
     t = time.time()
     stored = len(problem.heuristics_solutions)
-    kept = select_fe_candidates(problem, FE_CANDIDATES)
-    RH.check_found_solutions(problem)
+    final, n_candidates = MLD.Optimize_FE(problem, FE_CANDIDATES)
     row["time_fe"] = round(time.time() - t, 2)
+    row["fe_candidates"] = n_candidates
     emit("")
-    emit(f"--- step 3: FE solution optimization of the {kept} best of {stored} stored route sets "
-         f"(water MIP + consolidation): {row['time_fe']:.2f}s")
-    emit(f"  two-echelon feasible {len(problem.feas_solutions)}, infeasible {len(problem.inf_solutions)}")
+    emit(f"--- FE optimization: {n_candidates} min-fleet SE solutions of {stored} stored -> FE MILP + "
+         f"satellite-removal consolidation: {row['time_fe']:.2f}s")
+    emit(f"  two-echelon feasible {len(problem.feas_solutions)}, not feasible or cut off by the incumbent "
+         f"objective {len(problem.inf_solutions)}")
     if mip_log is not None:
         emit("  " + summarize_mip_calls(mip_log, n_mip).replace("\n", "\n  "))
     for k, sol in enumerate(problem.feas_solutions):
         emit(f"  solution {k}: objective {round(sol.objective, 1)}, {sol.nSEVs} SEVs, {sol.nFEVs} FEVs, "
              f"travel total {round(sol.travelTotal, 1)}")
 
-    # --- step 4: report ------------------------------------------------------------
-    final = problem.best_found
+    # --- report ------------------------------------------------------------------------
     row.update(solution_figures(problem, final))
     row["time_total"] = round(time.time() - problem.modelStartTime, 2)
     emit("")

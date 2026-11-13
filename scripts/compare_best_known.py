@@ -1,4 +1,4 @@
-"""Solution procedure (initial + local search, then + ITS) against the best-known solution of
+"""ITS (MultiEchelonPipeline.run_instance) against the best-known solution of
 data/sols, the best-known SEV routes evaluated by the same two-echelon check (two-way DP + water MIP).
 Usage: python scripts/compare_best_known.py c201.txt <output dir>   -> one JSON line"""
 import sys, io, os, contextlib, time, random, json
@@ -16,13 +16,12 @@ def figures(p, sol):
                 water=round(sol.travelWater,2), dist=round(street+sol.travelWater,2), obj=round(sol.objective,1))
 
 out={}
-for label, its in (("ls", 0), ("its", P.ITS_ITERATIONS)):
-    P.ITS_ITERATIONS = its
-    t=time.time()
-    with contextlib.redirect_stdout(io.StringIO()):
-        p, _, row = P.run_instance(name, reports)
-    out[label] = dict(figures(p, p.best_found), time=round(time.time()-t,1),
-                      two_way=[row["initial_two_way"], row["ls_two_way"], row["its_two_way"]], rounds=row["its_rounds"])
+t=time.time()
+with contextlib.redirect_stdout(io.StringIO()):
+    p, _, row = P.run_instance(name, reports)
+out["its"] = dict(figures(p, p.best_found), time=round(time.time()-t,1),
+                  se=[[row["init_sevs"], row["init_two_way"]], [row["init_ls_sevs"], row["init_ls_two_way"]],
+                      [row["its_sevs"], row["its_two_way"]]], fe_candidates=row["fe_candidates"])
 
 # best known: its SEV routes through the same two-echelon check (transshipments by our DP, water MIP)
 with contextlib.redirect_stdout(io.StringIO()):
