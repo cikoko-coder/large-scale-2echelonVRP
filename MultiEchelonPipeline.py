@@ -206,6 +206,11 @@ def trace_route_check(problem, route):
         info["reason"] = f"makespan needs {info['makespan_vehicles']} vehicles"
     elif info["tabu"]:
         info["reason"] = "route contains a tabu sequence"
+    elif not bounded["feasible"] and not bounded["attempts"] and bounded.get("blocked"):
+        pos, customer, late = bounded["blocked"][:3]
+        info["reason"] = (f"the sequence itself misses a time window: even the fastest schedule (one loading "
+                          f"before the first customer, no refill afterwards) reaches customer {customer} "
+                          f"(position {pos}) {round(late, 1)} late, so no refill plan can be on time")
     elif not bounded["feasible"]:
         attempts = "; ".join(f"K={k}: {v}" for k, v in bounded["attempts"].items())
         info["reason"] = f"no refill plan is within capacity and on time ({attempts})"
