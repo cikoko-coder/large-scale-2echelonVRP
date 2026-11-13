@@ -53,8 +53,8 @@ REPAIR_ALL_STARTS = True   # construction: MVRP-repair and store every start, no
 # The MIPs run on the free HiGHS solver by default (no size limit: the free routing MIP runs on
 # all 100 customers). Gurobi is the second option (MIP_SOLVER = "gurobi"; needs a full license for
 # 100 customers, the pip license stops at 2000 variables). If the MIP fails the heuristic solution is used.
-INITIAL_METHOD = "heuristic+free_mip"
-MIP_INITIAL_TIMELIMIT = 600   # seconds for the free routing MIP
+INITIAL_METHOD = "heuristic+mip"   # MIP warm-started with the heuristic routes (free HiGHS, 100 customers)
+MIP_INITIAL_TIMELIMIT = 300   # seconds for the free routing MIP (5 min)
 MIP_INITIAL_CUSTOMERS = None  # None: all customers; an int n restricts the instance to the first n customers (testing)
 
 # --- HELPER FUNCTIONS ---
