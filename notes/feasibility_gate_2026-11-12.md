@@ -242,3 +242,32 @@ Also fixed:
   (r207, r209) that the two-pass engine and the MIP accept.
 * `check_route_transshipments` with `ROUTE_CHECK = "mip"` called itself; it calls
   `MathModels.street_problem_MIP` now.
+
+## 9. Free MIP as the second initialization method, two-way cost (2026-11-13)
+
+`MultiEchelonPipeline.INITIAL_METHOD = "heuristic+free_mip"` (new default): step 1 runs the
+multi-start insertion heuristic and, independently, the free street routing MIP
+(`MLD.mip_initial_solution` with `warm_start=None`: no routes passed, no arcs fixed, the MIP
+routes all customers itself). Both route sets are stored in `heuristics_solutions`, so
+`check_found_solutions` takes both to the water MIP. `"heuristic+mip"` (warm start) stays.
+
+The cost that decides between the methods is the two-way check, not the MIP objective:
+* `RH.two_way_solution_cost(problem, routes)`: per route `two_way_transshipment_checking`
+  (minimum on-time transshipments K*, then the cheapest plan with K*); solution cost = sum of
+  the route costs (vehicle + c^s (distance + detours) + trips). Infeasible or incomplete route
+  sets get `BigNumber`.
+* `MLD.set_two_way_cost(problem, solution)` sets `solution.two_way` / `two_way_cost`;
+  `MLD.select_initial_by_two_way(problem, [(name, solution), ...])`: feasible first, then the
+  smallest two-way cost. The pipeline logs both costs and the chosen method
+  (`problem.initial_method`, `problem.initial_candidates`).
+* `RH.check_route_transshipments` (DP) now follows `REFILL_RULE` through `RH.route_refill_plan`
+  (default `"two_way"`), so the MVRP objective of `check_MVRP_solution` is the two-way cost too
+  and equals `is_route_feasible`. Before it always used the cheapest plan with any number of
+  trips (`optimal_cost`); with the 10000 trip cost both are the same, with the paper costs the
+  two-way plan can use fewer trips at a higher detour. `REFILL_RULE = "optimal_cost"` restores it.
+
+Check (sandbox license, 15 customers, 30 s): c208 heuristic 389.6 vs free MIP 371.6 (optimal),
+r201 595.1 vs 571.7 -> the free MIP is chosen; its routes need the same number of
+transshipments under the two-way DP as in the MIP. Test
+`test_free_mip_initializer_is_costed_by_the_two_way_check`. 34 tests pass.
+The "Error in demand supply check" print in this restricted-customer mode existed before.
