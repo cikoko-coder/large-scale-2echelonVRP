@@ -20,8 +20,9 @@ import local_search as LS
 #            from R*, local search on the best ALNS solution (N_LS * k: intensification grows with k),
 #            tabu list update + repair of the found schedules; R* = fewest SEVs, then two-way cost
 #   FE optimization (Multi_level_destroy.Optimize_FE): all min-fleet SE solutions found (more SEVs
-#     discarded) -> every route re-optimized by the fixed-route street MILP (FE_ROUTE_CHECK) -> FE
-#     routing MILP + satellite-removal consolidation (check_found_solutions)
+#     discarded) -> route check FE_ROUTE_CHECK ("dp": the two-way plans of the search, "mip": every
+#     route re-optimized by the fixed-route street MILP) -> FE routing MILP + satellite-removal
+#     consolidation (check_found_solutions)
 #   report: run_<instance>_<date>.txt, a line in the main report, summary_<date>.csv
 
 # --- CONFIGURATION ---
@@ -40,7 +41,7 @@ N_LS = 500                 # local search iterations (times the ITS iteration k)
 N_ALNS = 500               # ALNS iterations per ITS iteration
 SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
 FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
-FE_ROUTE_CHECK = "mip"     # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
+FE_ROUTE_CHECK = "dp"      # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
 #                            no minimum-transshipment bound), "dp" = the two-way DP of the search
 
 RANDOM_SEED = 32           # random.seed(RANDOM_SEED + its_iter)

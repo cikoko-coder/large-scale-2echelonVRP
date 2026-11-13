@@ -357,14 +357,14 @@ def get_weights_for_nodes_removal(customers_to_select, pool):
     return [x/total for x in weights]
 
 
-def Optimize_FE(problem_instance, max_candidates = None, route_check = "mip"):
+def Optimize_FE(problem_instance, max_candidates = None, route_check = "dp"):
     """
     Algorithm 8 on S*_SE: every stored route set with the fewest SEVs (solutions with more SEVs are
     discarded; ranked by two-way cost, at most max_candidates, None = all) goes through
-    RH.check_found_solutions. Its route-level checks run with RH.ROUTE_CHECK = route_check: "mip"
+    RH.check_found_solutions. Its route-level checks run with RH.ROUTE_CHECK = route_check: "dp"
+    keeps the two-way plans of the search (minimum transshipments, then TWO_WAY_OBJECTIVE); "mip"
     re-optimizes every route by the fixed-route street MILP (SolveFixedSEVRouteMILP, memoized), which
-    places the transshipments at minimum SE cost without the minimum-transshipment bound of the
-    two-way DP. Then the multi-trip / MVRP check, the FE routing MILP (FEVmodels.water_problem_MIP)
+    places the transshipments at minimum SE cost without the minimum-transshipment bound. Then the multi-trip / MVRP check, the FE routing MILP (FEVmodels.water_problem_MIP)
     and the satellite-removal consolidation, repeated while it improves.
     :return: (problem.best_found, number of SE solutions sent to the FE level)
     """
