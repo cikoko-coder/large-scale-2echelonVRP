@@ -39,10 +39,14 @@ N_ITS = 5                  # ITS iterations
 R_LS = 5                   # maximum repetitions of the local search
 N_LS = 500                 # local search iterations (times the ITS iteration k)
 N_ALNS = 500               # ALNS iterations per ITS iteration
+RESET_SCORES = False       # ALNS operator scores: False = kept across ITS iterations, True = reset every iteration (10/k)
+EQUAL_INITIAL_SCORES = False # ALNS operator scores: True = all start at 1, False = route removal / equal selection start at 10/k
 SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
 FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
 FE_ROUTE_CHECK = "dp"      # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
 #                            no minimum-transshipment bound), "dp" = the two-way DP of the search
+EXTRA_TRANSSHIPMENTS = 3   # FE stage: e > 0 = also try K* + 1 .. K* + e transshipments (each route alone, then all routes), keep the best
+EXTRA_TOP = 20             # ... on the EXTRA_TOP best two-echelon solutions only
 INCUMBENT_ROUTE_MIP = True # on every FE incumbent update, re-solve its routes by the fixed-route street MILP
 #                            (cheapest, any number of transshipments) and keep it if the 2E objective improves
 
@@ -221,9 +225,13 @@ def run_instance(instance_name: str, reports: dict):
     RH.ROUTE_CHECK = ROUTE_CHECK
     RH.REFILL_RULE = REFILL_RULE
     RH.TWO_WAY_OBJECTIVE = TWO_WAY_OBJECTIVE
+    RH.EXTRA_TRANSSHIPMENTS = EXTRA_TRANSSHIPMENTS
+    RH.EXTRA_TOP = EXTRA_TOP
     RH.INCUMBENT_ROUTE_MIP = INCUMBENT_ROUTE_MIP
     MLD.REPAIR_ALL_STARTS = REPAIR_ALL_STARTS
     MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
+    MLD.RESET_SCORES = RESET_SCORES
+    MLD.EQUAL_INITIAL_SCORES = EQUAL_INITIAL_SCORES
     out = []
 
     def emit(text=""):

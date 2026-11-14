@@ -507,7 +507,7 @@ def bounded_transshipment_checking(problem_instance, route, extra_trips = None):
     return result
 
 def two_pass_transshipment_checking(problem_instance, route, extra_trips = None, min_trips_first = False,
-                                    objective = "cost"):
+                                    objective = "cost", force_trips = None):
     """
     Optimal refill (transfer) plan of a fixed street route in two passes; same rules, arguments
     and returned dict as bounded_transshipment_checking (the street MIP for one route).
@@ -532,6 +532,8 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
     trip_unit_cost >= the detour cost of the K* plan this stops after K*.
     Cost: every trip counts one trip_unit_cost (the first load included), as the street MIP.
     min_trips_first: pass 2 only for K = K* (two_way_transshipment_checking).
+    force_trips: pass 2 only for exactly this K (K* <= K <= max_trips, else not feasible); used by
+    the K* + 1 trials of try_extra_transshipments.
     objective: plan chosen among the K-trip plans of pass 2: "cost" = cheapest (then earliest),
     "makespan" = earliest end of the last service, i.e. earliest return to the garage with the
     departure at the garage opening (then cheapest), "duration" = shortest route duration, return
@@ -670,8 +672,11 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
             result["blocked"] = blocked
     if k_star is None:
         return result
+    if force_trips is not None and not k_star <= force_trips <= max_trips:
+        result["attempts"][force_trips] = f"forced number of trips outside K* = {k_star} .. {max_trips}"
+        return result
 
-    if objective == "duration" and min_trips_first:
+    if objective == "duration" and min_trips_first and force_trips is None:
         plan = min_duration_split(problem_instance, route, k_star, forward, backward, detours, L, can_refill)
         if plan is not None:
             refills, extra_cost, departure, finish, duration, labels = plan
@@ -695,7 +700,8 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
 
     first_cost = unit*det[0]
     best = None #(n_trips, total, finish, label)
-    for K in range(k_star, max_trips + 1):
+    k_range = range(k_star, max_trips + 1) if force_trips is None else range(force_trips, force_trips + 1)
+    for K in k_range:
         if best is not None and min_trips_first:
             break #lexicographic: the plan with the minimum number of transshipments K* is kept
         if best is not None and fixed_cost + first_cost + K*trip_cost >= best[1] - eps:
@@ -737,6 +743,8 @@ def two_pass_transshipment_checking(problem_instance, route, extra_trips = None,
         if best is None or total < best[1] - eps:
             best = (K, total, found[1], found[2])
 
+    if best is None:
+        return result
     n_trips, total, finish, label = best
     refills = []
     while label is not None:
@@ -859,13 +867,29 @@ def min_duration_split(problem_instance, route, K, forward, backward, detours, L
 #  "mip" -> MathModels.street_problem_MIP
 ROUTE_CHECK = "dp"
 
+#number of transshipments forced per route (key: tuple of the customer indices), set only by
+#try_extra_transshipments while it evaluates its K* + 1 trials; empty during the search
+FORCED_TRIPS = {}
+
+def forced_refill_plan(problem_instance, route, n_trips):
+    """Cheapest on-time refill plan of the route with exactly n_trips trips (not feasible if none)."""
+    result = two_pass_transshipment_checking(problem_instance, route, force_trips = n_trips, objective = "cost")
+    if result["feasible"]:
+        returns_in_time(problem_instance, route, result)
+    return result
+
 def route_refill_plan(problem_instance, route):
     """
     Refill plan of one fixed route by the DP of REFILL_RULE (the rule of is_route_feasible):
     "two_way" -> two_way_transshipment_checking (minimum transshipments K*, then cheapest),
     "optimal" -> bothway_optimal_checking (exactly m), otherwise optimal_transshipment_checking
-    (cheapest with any number). :return: the DP result dict (cost includes the vehicle cost)
+    (cheapest with any number). A route in FORCED_TRIPS gets the cheapest plan with exactly that
+    number of trips (forced_refill_plan). :return: the DP result dict (cost includes the vehicle cost)
     """
+    if FORCED_TRIPS:
+        key = tuple(node.index for node in route)
+        if key in FORCED_TRIPS:
+            return forced_refill_plan(problem_instance, route, FORCED_TRIPS[key])
     if REFILL_RULE == "two_way":
         return two_way_transshipment_checking(problem_instance, route)
     if REFILL_RULE == "optimal":
@@ -1161,11 +1185,13 @@ def insert_into_every_index_slack(problem_instance, input_list, item):
         else:   
             prev_node = input_list[i-1]
             next_node = input_list[i]
-        service_start = max(item.start_interval, problem_instance.earliest_times_feasible[prev_node.index] + prev_node.unloading_time + problem_instance.distance_matrix[prev_node.index][item.index])
-        if service_start > item.end_interval:
+        #times without transshipments (refills only add time, so this never rejects a feasible insertion);
+        #travel_matrix and TIME_EPS as in the exact check (two_way_transshipment_checking)
+        service_start = max(item.start_interval, problem_instance.earliest_times_feasible[prev_node.index] + prev_node.unloading_time + problem_instance.travel_matrix[prev_node.index][item.index])
+        if service_start > item.end_interval + TIME_EPS:
             continue
-        next_arrival = service_start + item.unloading_time + problem_instance.distance_matrix[item.index][next_node.index]
-        if next_arrival <= problem_instance.latest_times_feasible[next_node.index]:
+        next_arrival = service_start + item.unloading_time + problem_instance.travel_matrix[item.index][next_node.index]
+        if next_arrival <= problem_instance.latest_times_feasible[next_node.index] + TIME_EPS:
             candidate = input_list[:i] + [item] + input_list[i:]
             distance_cost = get_min_multi_trip_cost(problem_instance, candidate) - initial_cost            
             
@@ -1223,7 +1249,7 @@ def get_latest_times(problem_instance, route):
     service_starts = [problem_instance.nodes[ind].start_interval for ind in indices]       
     unloading_times = [problem_instance.nodes[ind].unloading_time for ind in indices]
     latest_times_feasible = [problem_instance.nodes[ind].end_interval for ind in indices] 
-    distances = [problem_instance.distance_matrix[indices[i]][indices[i+1]] for i in range(size-1)]
+    distances = [problem_instance.travel_matrix[indices[i]][indices[i+1]] for i in range(size-1)] #travel times
     
     for i in range(1,size):
         arrivals[i] = service_starts[i - 1] + distances[i - 1] + unloading_times[i - 1]
@@ -1591,19 +1617,8 @@ def check_found_solutions(problem_instance):
             
             solution_two_echelon.checked_optimality = True
             if solution_two_echelon.is_feasible:      
-                before = 1000
-                after = 0
-                status_before = problem_instance.consolidated
-                problem_instance.consolidated = True
-                while abs(after - before) > 1 :
-                    before = round ( solution_two_echelon.travelTotal,1)
-                
-                    solution_two_echelon = check_2EVRP_solution_consolidated(problem_instance, solution_two_echelon)
-                    
-                    after = round ( solution_two_echelon.travelTotal,1) #if new solution is provided
-
+                solution_two_echelon = consolidate_solution(problem_instance, solution_two_echelon)
                 problem_instance.feas_solutions.append(solution_two_echelon)
-                problem_instance.consolidated = status_before
                 
                 if solution_two_echelon.nFEVs < best_FEV_number:
                     best_FEV_number = solution_two_echelon.nFEVs
@@ -1615,7 +1630,8 @@ def check_found_solutions(problem_instance):
                 problem_instance.inf_solutions.append(solution_two_echelon)   
         else:
             problem_instance.inf_solutions.append(solution_two_echelon)   
-        
+
+    extra_transshipments_on_top(problem_instance)
     return
 
 #can be called for VRP, MVRP, and 2e-MVRP
@@ -1891,6 +1907,108 @@ def check_2EVRP_solution(problem_instance, multi_trip_solution, remove_satellite
             refine_incumbent_by_route_mip(problem_instance, final_solution)
 
     return final_solution
+
+#FE stage: also try plans with up to EXTRA_TRANSSHIPMENTS transshipments more than the minimum K*
+#(0: off, the K* plans only). Trials for e = 1 .. EXTRA_TRANSSHIPMENTS: K* + e on each single route,
+#and K* + e on all routes at once; each trial is evaluated by the MVRP check, the FE MILP and the
+#satellite-removal consolidation, and the best by the hierarchical objective is kept.
+EXTRA_TRANSSHIPMENTS = 0
+EXTRA_TOP = 20   #the trials run on the EXTRA_TOP best two-echelon solutions (hierarchical objective) only
+
+def extra_transshipments_on_top(problem_instance):
+    """After the FE stage: try_extra_transshipments on the EXTRA_TOP best feasible two-echelon
+    solutions (problem.feas_solutions by hierarchical_key, one per route set) not tried before."""
+    if not EXTRA_TRANSSHIPMENTS:
+        return
+    tried = problem_instance.__dict__.setdefault("extra_tried", set())
+    ranked, seen = [], set()
+    for solution in sorted(problem_instance.feas_solutions, key = lambda x: hierarchical_key(problem_instance, x)):
+        key = tuple(sorted(tuple(node.index for node in route.sequence) for route in solution.routes_sevs))
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append((key, solution))
+        if len(ranked) == EXTRA_TOP:
+            break
+    for key, solution in ranked:
+        if key in tried:
+            continue
+        tried.add(key)
+        better = try_extra_transshipments(problem_instance, solution)
+        if better is not solution:
+            problem_instance.feas_solutions.append(better)
+
+def consolidate_solution(problem_instance, solution, forced = None):
+    """Satellite-removal consolidation (check_2EVRP_solution_consolidated) repeated while the total
+    travel changes by more than 1, with the forced trip counts of the solution (FORCED_TRIPS)."""
+    before, after = 1000, 0
+    status_before = problem_instance.consolidated
+    problem_instance.consolidated = True
+    forced = forced if forced is not None else getattr(solution, "forced_trips", {})
+    FORCED_TRIPS.clear()
+    FORCED_TRIPS.update(forced)
+    try:
+        while abs(after - before) > 1:
+            before = round(solution.travelTotal, 1)
+            solution = check_2EVRP_solution_consolidated(problem_instance, solution)
+            after = round(solution.travelTotal, 1)
+    finally:
+        FORCED_TRIPS.clear()
+        problem_instance.consolidated = status_before
+    solution.forced_trips = dict(forced)
+    return solution
+
+def try_extra_transshipments(problem_instance, solution):
+    """
+    K* + e trials of a two-echelon feasible solution, e = 1 .. EXTRA_TRANSSHIPMENTS: for every route
+    with an on-time plan of K* + e trips, the solution with that route forced to K* + e
+    (FORCED_TRIPS, cheapest such plan) and, with two or more such routes, all of them forced at once,
+    each through check_MVRP_solution, check_2EVRP_solution (which updates problem.best_found) and
+    the satellite-removal consolidation, compared with the consolidated given solution.
+    A record per trial goes to problem.extra_trip_trials.
+    :return: the best of the given solution and the trials (is_better_solution); the forced trip
+             counts of the returned solution are in its attribute forced_trips
+    """
+    if not EXTRA_TRANSSHIPMENTS or not solution.is_feasible:
+        return solution
+    routes = [list(route.sequence) for route in solution.routes_sevs]
+    k_star = {}
+    for route in routes:
+        base = route_refill_plan(problem_instance, route)
+        if base["feasible"]:
+            k_star[tuple(node.index for node in route)] = (route, base["n_trips"])
+    trials = []
+    for extra in range(1, EXTRA_TRANSSHIPMENTS + 1):
+        plus = {key: k + extra for key, (route, k) in k_star.items()
+                if forced_refill_plan(problem_instance, route, k + extra)["feasible"]}
+        trials.extend({key: k} for key, k in plus.items())
+        if len(plus) > 1:
+            trials.append(dict(plus))
+    log = problem_instance.__dict__.setdefault("extra_trip_trials", [])
+    best = solution
+    for forced in trials:
+        FORCED_TRIPS.clear()
+        FORCED_TRIPS.update(forced)
+        record = {"forced_routes": len(forced), "extra": max(k - k_star[key][1] for key, k in forced.items()),
+                  "base_objective": solution.objective,
+                  "base_trips": len(solution.transshipments), "trips": None, "objective": None,
+                  "nFEVs": None, "distance": None, "improved": False}
+        try:
+            trial = check_MVRP_solution(problem_instance, routes)
+            if trial.is_feasible:
+                record["trips"] = len(trial.transshipments)
+                trial = check_2EVRP_solution(problem_instance, trial)
+                if trial.is_feasible:
+                    trial = consolidate_solution(problem_instance, trial, forced)
+                    record.update(objective = trial.objective, nFEVs = trial.nFEVs,
+                                  distance = solution_distance(problem_instance, trial))
+                    if is_better_solution(problem_instance, trial, best):
+                        best = trial
+                        record["improved"] = True
+        finally:
+            FORCED_TRIPS.clear()
+        log.append(record)
+    return best
 
 def solution_distance(problem_instance, solution):
     """Total distance of a two-echelon solution: street (c^s (distance + detours), the trip charge
