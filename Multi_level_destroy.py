@@ -27,8 +27,13 @@ SA_ACCEPTANCE = 0.05               # p_acc: temperature = p_acc / its_iter * tra
 SCORE_SAME, SCORE_IMPROVING, SCORE_WORSE = 0.1, 1.0, 0.0   # alpha_0, alpha_1, alpha_-1 of eq. (24)
 SCORE_SAME_TOLERANCE = 1.0         # |Delta z| <= 1: insignificant change
 INITIAL_SCORE_DIVERSIFICATION = 10.0   # S_I and S_R at its_iter = 1 (divided by its_iter), S_W = S_N = 1
+EQUAL_INITIAL_SCORES = False   # True: every operator of every level starts at score 1 (no diversification bias);
+#                                False: S_I = S_R = INITIAL_SCORE_DIVERSIFICATION / its_iter as in the manuscript
 REMOVAL_FRACTIONS = [0.05, 0.10, 0.25, 0.35]   # additional removals A, B, C, D (share of the remaining customers)
 REPAIR_OPERATOR = "k_best_insertion"           # the single repair operator (Algorithm 7)
+RESET_SCORES = False           # True: operator scores re-initialized at every ITS iteration (S_I = S_R = 10/k);
+#                                False: initialized once per instance (k = 1), then carried over between ITS iterations
+RECORD_SCORES = False          # True: snapshot of the operator scores after every ALNS iteration in problem.score_history
 
 
 def solution_key(problem_instance, routes):
@@ -147,7 +152,8 @@ def Solve_by_multi_level_ALNS(problem_instance, start_solution, max_iterations =
     :return: (best route set: fleet first, then cost; report dict)
     """
     current = _routes_of(start_solution)
-    generate_operators_statistics(problem_instance)
+    if RESET_SCORES or getattr(problem_instance, "scores_roulette_selection_type", None) is None:
+        generate_operators_statistics(problem_instance)
     current_key, current_two_way = solution_key(problem_instance, current)
     best, best_key = current, current_key
     best_fleet = current_key[0]
@@ -164,9 +170,11 @@ def Solve_by_multi_level_ALNS(problem_instance, start_solution, max_iterations =
         if not new_two_way["feasible"]:
             update_scores(problem_instance, roulette_type, removal_type, removal_number, repair_type, SCORE_WORSE)
             report["infeasible"] += 1
+            record_scores(problem_instance, iteration, (roulette_type, removal_type, removal_number), SCORE_WORSE)
             continue
         score = calculate_score(current_key[1], new_key[1])
         update_scores(problem_instance, roulette_type, removal_type, removal_number, repair_type, score)
+        record_scores(problem_instance, iteration, (roulette_type, removal_type, removal_number), score)
 
         if new_key[0] < best_fleet:                               # aspiration: fewer SEVs than ever
             accept = True
@@ -197,6 +205,17 @@ def Solve_by_multi_level_ALNS(problem_instance, start_solution, max_iterations =
         "removal": dict(zip(problem_instance.operators_removal_type, problem_instance.nof_used_removal_type)),
         "size": dict(zip(problem_instance.operators_removal_number, problem_instance.nof_used_removal_number))}
     return best, report
+
+
+def record_scores(problem_instance, iteration, chosen, score):
+    """RECORD_SCORES: append the scores of every MLD level after this ALNS iteration to problem.score_history."""
+    if not RECORD_SCORES:
+        return
+    problem_instance.__dict__.setdefault("score_history", []).append({
+        "its_iter": problem_instance.its_iter, "iteration": iteration, "chosen": list(chosen), "score": score,
+        "roulette": list(problem_instance.scores_roulette_selection_type),
+        "removal": list(problem_instance.scores_removal_type),
+        "size": list(problem_instance.scores_removal_number)})
 
 
 def simulated_annealing_acceptance(new_cost, current_cost, temperature):
@@ -259,19 +278,21 @@ def multi_direction_random_destroy_repair(problem_instance, solution, roulette_t
 
 
 def generate_operators_statistics(problem_instance, destroy_in = None):
-    """Operators and initial scores of the MLD levels (manuscript Section 6.1): S_I = S_R =
-    INITIAL_SCORE_DIVERSIFICATION / its_iter, S_W = S_N = 1, every neighbour size 1; one repair."""
+    """Operators and initial scores of the MLD levels. EQUAL_INITIAL_SCORES: every operator starts
+    at 1; otherwise (manuscript Section 6.1) S_I = S_R = INITIAL_SCORE_DIVERSIFICATION / its_iter,
+    S_W = S_N = 1, every neighbour size 1; one repair."""
     k = problem_instance.its_iter
+    first = 1.0 if EQUAL_INITIAL_SCORES else INITIAL_SCORE_DIVERSIFICATION/k
     problem_instance.selection_counts = [1]*len(problem_instance.customers)
     problem_instance.selection_counts.insert(0, 0)
 
     problem_instance.operators_roulette_selection_type = ["equal", "weighted"]
-    problem_instance.scores_roulette_selection_type = [INITIAL_SCORE_DIVERSIFICATION/k, 1.0]
+    problem_instance.scores_roulette_selection_type = [first, 1.0]
     problem_instance.nof_used_roulette_selection_type = [0, 0]
     problem_instance.nof_success_roulette_selection_type = [0, 0]
 
     problem_instance.operators_removal_type = ["route", "node"]
-    problem_instance.scores_removal_type = [INITIAL_SCORE_DIVERSIFICATION/k, 1.0]
+    problem_instance.scores_removal_type = [first, 1.0]
     problem_instance.nof_used_removal_type = [0, 0]
     problem_instance.nof_success_removal_type = [0, 0]
 
