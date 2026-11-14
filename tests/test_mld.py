@@ -43,7 +43,7 @@ def test_initial_scores_fall_with_the_its_iteration(start):
         p.its_iter = k
         MLD.generate_operators_statistics(p)
         assert p.scores_roulette_selection_type == [10/k, 1.0]   # S_I, S_W
-        assert p.scores_removal_type == [10/k, 1.0]              # S_R, S_N
+        assert p.scores_removal_type == [MLD.ROUTE_REMOVAL_INITIAL_SCORE/k, 1.0]   # S_R, S_N
         assert p.operators_removal_number == [0.05, 0.10, 0.25, 0.35]
         assert p.scores_removal_number == [1.0]*4
         assert p.operators_repair_type == ["k_best_insertion"]   # single repair

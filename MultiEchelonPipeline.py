@@ -35,12 +35,16 @@ INSTANCES_TO_RUN = ["c201.txt", "c208.txt", "r201.txt", "r208.txt", "rc201.txt",
 
 # ITS parameters (manuscript Section 6.1)
 N_INIT = 5                 # starts of the multi-start initialization
-N_ITS = 5                  # ITS iterations
+N_ITS = 10                 # ITS iterations
 R_LS = 5                   # maximum repetitions of the local search
 N_LS = 500                 # local search iterations (times the ITS iteration k)
-N_ALNS = 500               # ALNS iterations per ITS iteration
+N_ALNS = 250               # ALNS iterations per ITS iteration
 RESET_SCORES = False       # ALNS operator scores: False = kept across ITS iterations, True = reset every iteration (10/k)
-EQUAL_INITIAL_SCORES = False # ALNS operator scores: True = all start at 1, False = route removal / equal selection start at 10/k
+EQUAL_INITIAL_SCORES = False # ALNS operator scores: True = all start at 1, False = equal selection starts at 10/k,
+#                              route removal at ROUTE_REMOVAL_INITIAL_SCORE/k
+ROUTE_REMOVAL_INITIAL_SCORE = 20.0  # initial score of the route removal at k = 1 (divided by k; node removal starts at 1)
+LS_STOP_ON_STAGNATION = False  # local search: True = an operator stops after a pass without improvement and the
+#                                descent after a round without moves; False = always N_LS * k passes, R_LS rounds
 SA_ACCEPTANCE = 0.05       # p_acc: SA temperature = p_acc / k * travel cost of the ALNS start
 FE_CANDIDATES = None       # min-fleet SE solutions sent to the FE MILP (None: all of them; more SEVs are discarded)
 FE_ROUTE_CHECK = "dp"      # route check before the FE MILP: "mip" = fixed-route street MILP (min SE cost,
@@ -232,6 +236,8 @@ def run_instance(instance_name: str, reports: dict):
     MLD.SA_ACCEPTANCE = SA_ACCEPTANCE
     MLD.RESET_SCORES = RESET_SCORES
     MLD.EQUAL_INITIAL_SCORES = EQUAL_INITIAL_SCORES
+    MLD.ROUTE_REMOVAL_INITIAL_SCORE = ROUTE_REMOVAL_INITIAL_SCORE
+    LS.STOP_ON_STAGNATION = LS_STOP_ON_STAGNATION
     out = []
 
     def emit(text=""):
@@ -246,7 +252,8 @@ def run_instance(instance_name: str, reports: dict):
          f"beta^s {round(problem.cost_vehicle_use, 2)}, beta^w {round(problem.cost_vehicle_use_FEV, 2)}, "
          f"per transshipment {problem.trip_unit_cost}, transfer duration U {problem.TransferDuration}")
     emit(f"ITS: N_init {N_INIT}, N_ITS {N_ITS}, R_LS {R_LS}, N_LS {N_LS} (x k), N_ALNS {N_ALNS}, p_acc {SA_ACCEPTANCE}, "
-         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}, two-way plan by {TWO_WAY_OBJECTIVE}")
+         f"tabu list {TABU_SEARCH_ACTIVE}, route check {ROUTE_CHECK}, two-way plan by {TWO_WAY_OBJECTIVE}, "
+         f"route removal score {ROUTE_REMOVAL_INITIAL_SCORE}/k, LS stop on stagnation {LS_STOP_ON_STAGNATION}")
     emit(f"FE: MILP on {backend} (time limit {problem.timelimit_FEmodel}s), "
          f"{'all' if FE_CANDIDATES is None else f'up to {FE_CANDIDATES}'} min-fleet SE solutions, "
          f"routes re-optimized by {'the fixed-route street MILP' if FE_ROUTE_CHECK == 'mip' else 'the two-way DP'}")

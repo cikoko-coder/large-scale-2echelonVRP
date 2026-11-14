@@ -48,6 +48,8 @@ EPS = RH.TIME_EPS
 MIN_GAIN = 1e-3          # a move must lower the two-way cost by more than this
 NEIGHBOURS = 20          # size of the granular neighbour lists (k nearest customers)
 MAX_PASSES = 50          # passes over all customers per operator before giving up
+STOP_ON_STAGNATION = True  # True: an operator stops after a pass without improvement, the descent after a
+#                            round without moves; False: always max_passes passes and max_rounds rounds
 
 
 class RouteEvaluator:
@@ -328,7 +330,7 @@ def run_operator(ctx, name, rng, max_passes = MAX_PASSES, stats = None):
                 applied += 1
                 improved = True
         stats["passes"][name] += 1
-        if not improved:
+        if not improved and STOP_ON_STAGNATION:
             break
     stats["moves"][name] += applied
     return applied
@@ -363,7 +365,7 @@ def local_search(problem, routes, operators = ("relocate", "two_opt_star"), seed
     rounds = 0
     if report["feasible_start"]:
         for rounds in range(1, max_rounds + 1):
-            if sum(run_operator(ctx, name, rng, max_passes, stats) for name in operators) == 0:
+            if sum(run_operator(ctx, name, rng, max_passes, stats) for name in operators) == 0 and STOP_ON_STAGNATION:
                 break
     out = ctx.solution()
     served = sum(len(r) for r in out)

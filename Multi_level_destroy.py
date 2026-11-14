@@ -26,9 +26,10 @@ BigNumber = 1000000
 SA_ACCEPTANCE = 0.05               # p_acc: temperature = p_acc / its_iter * travel cost of the ALNS start
 SCORE_SAME, SCORE_IMPROVING, SCORE_WORSE = 0.1, 1.0, 0.0   # alpha_0, alpha_1, alpha_-1 of eq. (24)
 SCORE_SAME_TOLERANCE = 1.0         # |Delta z| <= 1: insignificant change
-INITIAL_SCORE_DIVERSIFICATION = 10.0   # S_I and S_R at its_iter = 1 (divided by its_iter), S_W = S_N = 1
+INITIAL_SCORE_DIVERSIFICATION = 10.0   # S_I (equal selection) at its_iter = 1 (divided by its_iter), S_W = S_N = 1
+ROUTE_REMOVAL_INITIAL_SCORE = 20.0     # S_R (route removal) at its_iter = 1 (divided by its_iter)
 EQUAL_INITIAL_SCORES = False   # True: every operator of every level starts at score 1 (no diversification bias);
-#                                False: S_I = S_R = INITIAL_SCORE_DIVERSIFICATION / its_iter as in the manuscript
+#                                False: S_I = INITIAL_SCORE_DIVERSIFICATION / its_iter, S_R = ROUTE_REMOVAL_INITIAL_SCORE / its_iter
 REMOVAL_FRACTIONS = [0.05, 0.10, 0.25, 0.35]   # additional removals A, B, C, D (share of the remaining customers)
 REPAIR_OPERATOR = "k_best_insertion"           # the single repair operator (Algorithm 7)
 RESET_SCORES = False           # True: operator scores re-initialized at every ITS iteration (S_I = S_R = 10/k);
@@ -279,10 +280,12 @@ def multi_direction_random_destroy_repair(problem_instance, solution, roulette_t
 
 def generate_operators_statistics(problem_instance, destroy_in = None):
     """Operators and initial scores of the MLD levels. EQUAL_INITIAL_SCORES: every operator starts
-    at 1; otherwise (manuscript Section 6.1) S_I = S_R = INITIAL_SCORE_DIVERSIFICATION / its_iter,
+    at 1; otherwise (manuscript Section 6.1) S_I = INITIAL_SCORE_DIVERSIFICATION / its_iter,
+    S_R = ROUTE_REMOVAL_INITIAL_SCORE / its_iter,
     S_W = S_N = 1, every neighbour size 1; one repair."""
     k = problem_instance.its_iter
     first = 1.0 if EQUAL_INITIAL_SCORES else INITIAL_SCORE_DIVERSIFICATION/k
+    route_first = 1.0 if EQUAL_INITIAL_SCORES else ROUTE_REMOVAL_INITIAL_SCORE/k
     problem_instance.selection_counts = [1]*len(problem_instance.customers)
     problem_instance.selection_counts.insert(0, 0)
 
@@ -292,7 +295,7 @@ def generate_operators_statistics(problem_instance, destroy_in = None):
     problem_instance.nof_success_roulette_selection_type = [0, 0]
 
     problem_instance.operators_removal_type = ["route", "node"]
-    problem_instance.scores_removal_type = [first, 1.0]
+    problem_instance.scores_removal_type = [route_first, 1.0]
     problem_instance.nof_used_removal_type = [0, 0]
     problem_instance.nof_success_removal_type = [0, 0]
 
